@@ -81,9 +81,6 @@ int main(int argc, char *argv[])
         printf("  Signer CN: %s (validity: %d days)\n", CERT_SIGNER_CN, validity);
         printf("  Output: %s\n\n", out_dir);
 
-        OpenSSL_add_all_algorithms();
-        ERR_load_crypto_strings();
-
         if (cert_generate(out_dir, ca_pw, signer_pw, validity)) {
             printf("\nCertificate generation successful!\n");
             printf("\nNext steps:\n");
@@ -95,9 +92,6 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        EVP_cleanup();
-        CRYPTO_cleanup_all_ex_data();
-        ERR_free_strings();
         return 0;
     }
 
@@ -137,9 +131,6 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        OpenSSL_add_all_algorithms();
-        ERR_load_crypto_strings();
-
         int ret;
         if (directory_exists(target)) {
             /* Batch sign */
@@ -167,9 +158,6 @@ int main(int argc, char *argv[])
             ret = 1;
         }
 
-        EVP_cleanup();
-        CRYPTO_cleanup_all_ex_data();
-        ERR_free_strings();
         return ret;
     }
 
@@ -189,14 +177,8 @@ int main(int argc, char *argv[])
                 ca_path = argv[++i];
         }
 
-        OpenSSL_add_all_algorithms();
-        ERR_load_crypto_strings();
-
         int ret = authenticode_verify(target, ca_path) ? 0 : 1;
 
-        EVP_cleanup();
-        CRYPTO_cleanup_all_ex_data();
-        ERR_free_strings();
         return ret;
     }
 

@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -11,25 +10,24 @@
 #include <direct.h>
 #define mkdir(path, mode) _mkdir(path)
 #define PATH_SEPARATOR "\\"
+#define strcasecmp _stricmp
 #else
+#include <dirent.h>
 #define PATH_SEPARATOR "/"
 #endif
 
 #define MAX_PATH_LEN 4096
 
-// 检查文件是否存在
 int file_exists(const char* path) {
     struct stat st;
     return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
 }
 
-// 检查目录是否存在
 int directory_exists(const char* path) {
     struct stat st;
     return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
 }
 
-// 创建目录（包括父目录）
 int create_directory(const char* path) {
     if (directory_exists(path)) {
         return 1;
@@ -61,7 +59,6 @@ int create_directory(const char* path) {
     return mkdir(tmp, 0755) == 0;
 }
 
-// 获取文件大小
 long get_file_size(const char* filename) {
     struct stat st;
     if (stat(filename, &st) == 0) {
@@ -70,7 +67,6 @@ long get_file_size(const char* filename) {
     return -1;
 }
 
-// 读取文件内容
 unsigned char* read_file(const char* filename, size_t* size) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
@@ -108,7 +104,6 @@ unsigned char* read_file(const char* filename, size_t* size) {
     return buffer;
 }
 
-// 写入文件内容
 int write_file(const char* filename, const unsigned char* data, size_t size) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
@@ -121,7 +116,6 @@ int write_file(const char* filename, const unsigned char* data, size_t size) {
     return bytes_written == size;
 }
 
-// 获取文件扩展名
 const char* get_file_extension(const char* filename) {
     const char* dot = strrchr(filename, '.');
     if (!dot || dot == filename) {
@@ -130,60 +124,94 @@ const char* get_file_extension(const char* filename) {
     return dot + 1;
 }
 
-// 检查文件是否匹配扩展名
 int has_extension(const char* filename, const char* extension) {
     const char* ext = get_file_extension(filename);
     return strcasecmp(ext, extension) == 0;
 }
 
-// 获取目录中的文件列表
 FileList* get_files_in_directory(const char* directory,
     const char* extension_filter) {
-    DIR* dir = opendir(directory);
-    if (!dir) {
-        return NULL;
-    }
 
     FileList* list = (FileList*)malloc(sizeof(FileList));
-    if (!list) {
-        closedir(dir);
-        return NULL;
-    }
+    if (!list) return NULL;
 
     list->files = NULL;
     list->count = 0;
     list->capacity = 0;
 
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        // 跳过 . 和 ..
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0) {
+#ifdef _WIN32
+    char search_pattern[MAX_PATH_LEN];
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind;
+
+    snprintf(search_pattern, sizeof(search_pattern), "%s\\*", directory);
+    hFind = FindFirstFileA(search_pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        free(list);
+        return NULL;
+    }
+
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
             continue;
+
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+
+        if (extension_filter && strlen(extension_filter) > 0) {
+            if (!has_extension(fd.cFileName, extension_filter))
+                continue;
         }
 
-        // 构建完整路径
+        char path[MAX_PATH_LEN];
+        snprintf(path, sizeof(path), "%s\\%s", directory, fd.cFileName);
+
+        if (list->count >= list->capacity) {
+            size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
+            char** new_files = realloc(list->files, new_capacity * sizeof(char*));
+            if (!new_files) {
+                free_file_list(list);
+                FindClose(hFind);
+                return NULL;
+            }
+            list->files = new_files;
+            list->capacity = new_capacity;
+        }
+
+        list->files[list->count] = strdup(path);
+        if (!list->files[list->count]) {
+            free_file_list(list);
+            FindClose(hFind);
+            return NULL;
+        }
+        list->count++;
+    } while (FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+#else
+    DIR* dir = opendir(directory);
+    if (!dir) {
+        free(list);
+        return NULL;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
         char path[MAX_PATH_LEN];
         snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name);
 
         struct stat st;
-        if (stat(path, &st) != 0) {
-            continue;
-        }
+        if (stat(path, &st) != 0) continue;
+        if (!S_ISREG(st.st_mode)) continue;
 
-        // 只处理普通文件
-        if (!S_ISREG(st.st_mode)) {
-            continue;
-        }
-
-        // 应用扩展名过滤器
         if (extension_filter && strlen(extension_filter) > 0) {
-            if (!has_extension(entry->d_name, extension_filter)) {
+            if (!has_extension(entry->d_name, extension_filter))
                 continue;
-            }
         }
 
-        // 添加到列表
         if (list->count >= list->capacity) {
             size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
             char** new_files = realloc(list->files, new_capacity * sizeof(char*));
@@ -202,15 +230,15 @@ FileList* get_files_in_directory(const char* directory,
             closedir(dir);
             return NULL;
         }
-
         list->count++;
     }
 
     closedir(dir);
+#endif
+
     return list;
 }
 
-// 释放文件列表
 void free_file_list(FileList* list) {
     if (list) {
         for (size_t i = 0; i < list->count; i++) {
@@ -221,7 +249,6 @@ void free_file_list(FileList* list) {
     }
 }
 
-// 获取文件名（不包含路径）
 char* get_basename(const char* path) {
     const char* slash = strrchr(path, '/');
     if (!slash) {
@@ -236,7 +263,6 @@ char* get_basename(const char* path) {
     }
 }
 
-// 获取目录名
 char* get_dirname(const char* path) {
     char* result = strdup(path);
     if (!result) return NULL;
@@ -257,7 +283,6 @@ char* get_dirname(const char* path) {
     return result;
 }
 
-// 连接路径
 char* path_join(const char* dir, const char* file) {
     size_t dir_len = strlen(dir);
     size_t file_len = strlen(file);

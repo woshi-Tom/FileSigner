@@ -11,12 +11,192 @@
 #include <openssl/err.h>
 #include <openssl/asn1.h>
 #include <openssl/objects.h>
-#include <openssl/ess.h>
+#include <openssl/pem.h>
 #include <openssl/bio.h>
+#include <openssl/rand.h>
+
+/* ------------------------------------------------------------------ */
+/* DER builder — raw byte buffer for manual PKCS#7 construction       */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    unsigned char *data;
+    size_t len;
+    size_t cap;
+} DerBuf;
+
+static int db_init(DerBuf *db)
+{
+    db->cap = 4096;
+    db->len = 0;
+    db->data = (unsigned char *)OPENSSL_malloc(db->cap);
+    return db->data != NULL;
+}
+
+static void db_free(DerBuf *db)
+{
+    OPENSSL_free(db->data);
+    db->data = NULL;
+    db->len = 0;
+}
+
+static int db_grow(DerBuf *db, size_t need)
+{
+    if (db->len + need <= db->cap) return 1;
+    while (db->len + need > db->cap) db->cap *= 2;
+    unsigned char *p = (unsigned char *)OPENSSL_realloc(db->data, db->cap);
+    if (!p) return 0;
+    db->data = p;
+    return 1;
+}
+
+static int db_raw(DerBuf *db, const void *src, size_t n)
+{
+    if (!db_grow(db, n)) return 0;
+    memcpy(db->data + db->len, src, n);
+    db->len += n;
+    return 1;
+}
+
+static int db_byte(DerBuf *db, unsigned char b) { return db_raw(db, &b, 1); }
+
+static int db_len(DerBuf *db, size_t len)
+{
+    if (len < 0x80) return db_byte(db, (unsigned char)len);
+    unsigned char tmp[5];
+    int n;
+    if (len < 0x100)      { tmp[0] = 0x81; tmp[1] = (unsigned char)len; n = 2; }
+    else if (len < 0x10000) { tmp[0] = 0x82; tmp[1] = (unsigned char)(len >> 8); tmp[2] = (unsigned char)len; n = 3; }
+    else                    { tmp[0] = 0x83; tmp[1] = (unsigned char)(len >> 16); tmp[2] = (unsigned char)(len >> 8); tmp[3] = (unsigned char)len; n = 4; }
+    return db_raw(db, tmp, n);
+}
+
+static int db_tag(DerBuf *db, unsigned char tag, size_t body_len)
+{
+    return db_byte(db, tag) && db_len(db, body_len);
+}
+
+/* Push current length as a placeholder, return position for later fix */
+static size_t db_push_len_placeholder(DerBuf *db)
+{
+    /* Reserve 5 bytes for tag + max length encoding */
+    size_t pos = db->len;
+    unsigned char zeros[5] = {0};
+    db_raw(db, zeros, 5);
+    return pos;
+}
+
+/* Fix a previously pushed placeholder with actual tag+length */
+static void db_fix_placeholder(DerBuf *db, size_t pos, unsigned char tag,
+                                size_t body_len)
+{
+    /* body_len = current_len - (pos + 5) */
+    size_t actual = db->len - pos - 5;
+    /* Write the real tag+length at pos, then shift body */
+    unsigned char hdr[5];
+    int hdr_len = 0;
+    hdr[hdr_len++] = tag;
+    if (actual < 0x80) {
+        hdr[hdr_len++] = (unsigned char)actual;
+    } else if (actual < 0x100) {
+        hdr[hdr_len++] = 0x81;
+        hdr[hdr_len++] = (unsigned char)actual;
+        hdr_len += 0; /* already set */
+    } else {
+        hdr[hdr_len++] = 0x82;
+        hdr[hdr_len++] = (unsigned char)(actual >> 8);
+        hdr[hdr_len++] = (unsigned char)actual;
+    }
+    /* Copy header into position (overwriting zeros) */
+    memcpy(db->data + pos, hdr, hdr_len);
+    /* Shift body left if header is shorter than 5 bytes */
+    if (hdr_len < 5) {
+        size_t shift = 5 - hdr_len;
+        memmove(db->data + pos + hdr_len, db->data + pos + 5, actual);
+        db->len -= shift;
+    }
+    (void)body_len;
+}
+
+static int db_der_int(DerBuf *db, long val)
+{
+    unsigned char tmp[9];
+    int n = 0;
+    tmp[n++] = (unsigned char)(val & 0xff);
+    val >>= 8;
+    while (val) { tmp[n++] = (unsigned char)(val & 0xff); val >>= 8; }
+    /* If high bit set, prepend 0x00 */
+    if (tmp[n-1] & 0x80) tmp[n++] = 0x00;
+    /* Reverse to big-endian */
+    int i;
+    for (i = 0; i < n/2; i++) {
+        unsigned char c = tmp[i]; tmp[i] = tmp[n-1-i]; tmp[n-1-i] = c;
+    }
+    return db_tag(db, 0x02, n) && db_raw(db, tmp, n);
+}
+
+static int db_der_octet_string(DerBuf *db, const unsigned char *data, size_t len)
+{
+    return db_tag(db, 0x04, len) && db_raw(db, data, len);
+}
+
+static int db_der_oid_raw(DerBuf *db, const unsigned char *der, size_t len)
+{
+    return db_tag(db, 0x06, len) && db_raw(db, der, len);
+}
+
+static int db_der_null(DerBuf *db)
+{
+    return db_tag(db, 0x05, 0);
+}
+
+static int db_der_oid_nid(DerBuf *db, int nid)
+{
+    ASN1_OBJECT *obj = OBJ_nid2obj(nid);
+    if (!obj) return 0;
+    unsigned char buf[64];
+    int len = i2d_ASN1_OBJECT(obj, NULL);
+    if (len <= 0 || (size_t)len > sizeof(buf)) return 0;
+    unsigned char *p = buf;
+    i2d_ASN1_OBJECT(obj, &p);
+    return db_der_oid_raw(db, buf + 1, len - 1); /* skip tag */
+}
+
+static int db_der_oid_str(DerBuf *db, const char *oid_str)
+{
+    ASN1_OBJECT *obj = OBJ_txt2obj(oid_str, 1);
+    if (!obj) return 0;
+    unsigned char buf[64];
+    int len = i2d_ASN1_OBJECT(obj, NULL);
+    if (len <= 0 || (size_t)len > sizeof(buf)) { ASN1_OBJECT_free(obj); return 0; }
+    unsigned char *p = buf;
+    i2d_ASN1_OBJECT(obj, &p);
+    ASN1_OBJECT_free(obj);
+    return db_der_oid_raw(db, buf + 1, len - 1); /* skip tag */
+}
+
+/* Encode a raw DER SEQUENCE (body already DER encoded) */
+static int db_der_seq(DerBuf *db, const unsigned char *body, size_t body_len)
+{
+    return db_tag(db, 0x30, body_len) && db_raw(db, body, body_len);
+}
+
+/* Encode a raw DER SET (body already DER encoded) */
+static int db_der_set(DerBuf *db, const unsigned char *body, size_t body_len)
+{
+    return db_tag(db, 0x31, body_len) && db_raw(db, body, body_len);
+}
+
+/* Copy existing DER data into buffer (e.g. from OpenSSL i2d functions) */
+static int db_der_copy(DerBuf *db, const unsigned char *der, size_t len)
+{
+    return db_raw(db, der, len);
+}
 
 /* ------------------------------------------------------------------ */
 /* Load PFX/P12 file — extract cert, private key, CA chain            */
 /* ------------------------------------------------------------------ */
+
 static int load_pfx(const char *path, const char *password,
                      EVP_PKEY **pkey, X509 **cert, STACK_OF(X509) **ca)
 {
@@ -38,259 +218,391 @@ static int load_pfx(const char *path, const char *password,
 }
 
 /* ------------------------------------------------------------------ */
-/* Build the PKCS#7 SignedData with Authenticode attributes            */
+/* Build authenticated attributes as DER SET OF                       */
 /* ------------------------------------------------------------------ */
-static PKCS7* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
-                                        STACK_OF(X509) *ca_chain,
-                                        const unsigned char *pe_hash,
-                                        unsigned int pe_hash_len)
+
+static int build_auth_attrs_der(const unsigned char *pe_hash,
+                                 unsigned int pe_hash_len,
+                                 const unsigned char *cert_der,
+                                 int cert_der_len,
+                                 DerBuf *out)
 {
-    PKCS7 *p7 = NULL;
-    PKCS7_SIGNER_INFO *si = NULL;
-    STACK_OF(X509_ATTRIBUTE) *auth_attr = NULL;
+    DerBuf body;
+    if (!db_init(&body)) return 0;
+
+    /* Attribute 1: contentType = SPC_PE_IMAGE_DATA (OID 1.3.6.1.4.1.311.2.1.15) */
+    {
+        DerBuf val;
+        db_init(&val);
+        db_der_oid_str(&val, SPC_PE_IMAGE_DATA_OID);
+
+        DerBuf attr;
+        db_init(&attr);
+        /* attr = SEQUENCE { OID(NID_pkcs9_contentType), SET { value } } */
+        db_der_oid_nid(&attr, NID_pkcs9_contentType);
+        {
+            DerBuf set_body;
+            db_init(&set_body);
+            db_raw(&set_body, val.data, val.len);
+            db_der_set(&attr, set_body.data, set_body.len);
+            db_free(&set_body);
+        }
+        db_raw(&body, attr.data, attr.len);
+        db_free(&attr);
+        db_free(&val);
+    }
+
+    /* Attribute 2: messageDigest = SHA256(PE hash) */
+    {
+        DerBuf val;
+        db_init(&val);
+        db_der_octet_string(&val, pe_hash, pe_hash_len);
+
+        DerBuf attr;
+        db_init(&attr);
+        db_der_oid_nid(&attr, NID_pkcs9_messageDigest);
+        {
+            DerBuf set_body;
+            db_init(&set_body);
+            db_raw(&set_body, val.data, val.len);
+            db_der_set(&attr, set_body.data, set_body.len);
+            db_free(&set_body);
+        }
+        db_raw(&body, attr.data, attr.len);
+        db_free(&attr);
+        db_free(&val);
+    }
+
+    /* Attribute 3: SPC_STATEMENT_TYPE = individualCodeSigning */
+    {
+        DerBuf val;
+        db_init(&val);
+        db_der_oid_str(&val, SPC_INDIVIDUAL_PURPOSE);
+
+        DerBuf attr;
+        db_init(&attr);
+        /* Use SPC_STATEMENT_TYPE OID as the attribute type */
+        db_der_oid_str(&attr, SPC_STATEMENT_TYPE_OID);
+        {
+            DerBuf set_body;
+            db_init(&set_body);
+            db_raw(&set_body, val.data, val.len);
+            db_der_set(&attr, set_body.data, set_body.len);
+            db_free(&set_body);
+        }
+        db_raw(&body, attr.data, attr.len);
+        db_free(&attr);
+        db_free(&val);
+    }
+
+    /* Attribute 4: ESS signing-certificate (SHA1 of cert DER) */
+    {
+        unsigned char cert_sha1[EVP_MAX_MD_SIZE];
+        unsigned int cert_sha1_len = 0;
+        EVP_Digest(cert_der, (size_t)cert_der_len,
+                    cert_sha1, &cert_sha1_len, EVP_sha1(), NULL);
+
+        /* Build ESS SigningCert value manually as DER:
+         * SigningCert ::= SEQUENCE {
+         *   certs ::= SEQUENCE OF ESSCertID
+         * }
+         * ESSCertID ::= SEQUENCE {
+         *   hash ::= OCTET STRING (SHA1 of cert DER)
+         *   issuerSerial ::= SEQUENCE {
+         *     issuer ::= [0] IMPLICIT SEQUENCE OF GeneralName (issuer name as is)
+         *     serial ::= CertificateSerialNumber (INTEGER)
+         *   }
+         * }
+         */
+        /* We'll encode this directly and add as attribute */
+        /* For simplicity, skip ESS signing-certificate — Windows still validates
+           without it for self-signed chains. The important attrs are above. */
+        (void)cert_sha1;
+        (void)cert_sha1_len;
+    }
+
+    /* Wrap as SET OF */
+    db_der_set(out, body.data, body.len);
+    db_free(&body);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Sign the authenticated attributes and return encrypted digest      */
+/* ------------------------------------------------------------------ */
+
+static int sign_attrs(const unsigned char *der_attrs, size_t der_len,
+                       EVP_PKEY *pkey,
+                       unsigned char **out_sig, size_t *out_sig_len)
+{
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx) return 0;
+
+    if (EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, pkey) != 1 ||
+        EVP_DigestSignUpdate(ctx, der_attrs, der_len) != 1 ||
+        EVP_DigestSignFinal(ctx, NULL, out_sig_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+
+    *out_sig = (unsigned char *)OPENSSL_malloc(*out_sig_len);
+    if (!*out_sig) { EVP_MD_CTX_free(ctx); return 0; }
+
+    if (EVP_DigestSignFinal(ctx, *out_sig, out_sig_len) != 1) {
+        OPENSSL_free(*out_sig); *out_sig = NULL;
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+
+    EVP_MD_CTX_free(ctx);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Build PKCS#7 SignedData as raw DER                                 */
+/* ------------------------------------------------------------------ */
+
+static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
+                                                STACK_OF(X509) *ca_chain,
+                                                const unsigned char *pe_hash,
+                                                unsigned int pe_hash_len,
+                                                int *out_len)
+{
+    DerBuf signed_data;
     unsigned char *der_attrs = NULL;
     unsigned char *sig = NULL;
-    unsigned char cert_sha1[EVP_MAX_MD_SIZE];
-    unsigned int cert_sha1_len = 0;
-    EVP_MD_CTX *mdctx = NULL;
-    size_t der_len;
-    int i;
+    size_t sig_len = 0;
+    unsigned char *cert_der = NULL;
+    int cert_der_len = 0;
 
-    /* NIDs */
-    static int nid_spc_pe_image_data = 0;
-    static int nid_spc_sp_opus_info = 0;
-    static int nid_spc_statement_type = 0;
-    static int nid_spc_individual_purpose = 0;
+    if (!db_init(&signed_data)) return NULL;
 
-    if (!nid_spc_pe_image_data)
-        nid_spc_pe_image_data = OBJ_txt2nid(SPC_PE_IMAGE_DATA_OID);
-    if (!nid_spc_sp_opus_info)
-        nid_spc_sp_opus_info = OBJ_txt2nid(SPC_SP_OPUS_INFO_OID);
-    if (!nid_spc_statement_type)
-        nid_spc_statement_type = OBJ_txt2nid(SPC_STATEMENT_TYPE_OID);
-    if (!nid_spc_individual_purpose)
-        nid_spc_individual_purpose = OBJ_txt2nid(SPC_INDIVIDUAL_PURPOSE);
+    /* 1. version = 1 */
+    db_der_int(&signed_data, 1);
 
-    /* 1. Create empty PKCS7 with SignedData type */
-    p7 = PKCS7_new();
-    if (!p7) return NULL;
-    PKCS7_set_type(p7, NID_pkcs7_signed);
-    if (!p7->d.sign) { PKCS7_free(p7); return NULL; }
-
-    /* 2. Add signing certificate */
-    if (!PKCS7_add_certificate(p7, cert)) {
-        PKCS7_free(p7); return NULL;
-    }
-
-    /* 3. Add CA chain certificates */
-    if (ca_chain) {
-        for (i = 0; i < sk_X509_num(ca_chain); i++) {
-            PKCS7_add_certificate(p7, sk_X509_value(ca_chain, i));
-        }
-    }
-
-    /* 4. Set digest and signature algorithms (SHA256 + RSA) */
-    p7->d.sign->digest_alg = X509_ALGOR_new();
-    if (!p7->d.sign->digest_alg) { PKCS7_free(p7); return NULL; }
-    X509_ALGOR_set0(p7->d.sign->digest_alg,
-                     OBJ_nid2obj(NID_sha256), V_ASN1_NULL, NULL);
-
-    /* 5. Set eContentType = SPC_PE_IMAGE_DATA */
-    ASN1_OBJECT_free(p7->d.sign->contents->type);
-    p7->d.sign->contents->type = OBJ_nid2obj(nid_spc_pe_image_data);
-
-    /* 6. Create SignerInfo */
-    si = PKCS7_SIGNER_INFO_new();
-    if (!si) { PKCS7_free(p7); return NULL; }
-
-    if (!PKCS7_SIGNER_INFO_set(si, cert, pkey, EVP_sha256())) {
-        PKCS7_SIGNER_INFO_free(si);
-        PKCS7_free(p7);
-        return NULL;
-    }
-
-    /* 7. Build authenticated attributes */
-    auth_attr = sk_X509_ATTRIBUTE_new_null();
-    if (!auth_attr) {
-        PKCS7_SIGNER_INFO_free(si); PKCS7_free(p7); return NULL;
-    }
-
-    /* 7a. contentType = SPC_PE_IMAGE_DATA */
+    /* 2. digestAlgorithms = SET { SEQUENCE { SHA256, NULL } } */
     {
-        ASN1_TYPE *val = ASN1_TYPE_new();
-        if (!val) goto attr_fail;
-        val->type = V_ASN1_OBJECT;
-        val->value.object = OBJ_nid2obj(nid_spc_pe_image_data);
-        X509at_add1_attr(&auth_attr,
-            X509_ATTRIBUTE_create(NID_pkcs9_contentType,
-                                  V_ASN1_OBJECT, val->value.object));
-        ASN1_free(val);
-    }
-
-    /* 7b. messageDigest = SHA256(PE data) */
-    {
-        ASN1_OCTET_STRING *md_val = ASN1_OCTET_STRING_new();
-        if (!md_val) goto attr_fail;
-        ASN1_OCTET_STRING_set(md_val, pe_hash, pe_hash_len);
-        X509at_add1_attr(&auth_attr,
-            X509_ATTRIBUTE_create(NID_pkcs9_messageDigest,
-                                  V_ASN1_OCTET_STRING, md_val));
-        ASN1_OCTET_STRING_free(md_val);
-    }
-
-    /* 7c. SPC_STATEMENT_TYPE = individualCodeSigning */
-    {
-        ASN1_OBJECT *purpose = OBJ_txt2obj(SPC_INDIVIDUAL_PURPOSE, 0);
-        if (purpose) {
-            X509at_add1_attr(&auth_attr,
-                X509_ATTRIBUTE_create(nid_spc_statement_type,
-                                      V_ASN1_OBJECT, purpose));
-            ASN1_OBJECT_free(purpose);
-        }
-    }
-
-    /* 7d. signing-certificate (ESS) with SHA1 of signer cert */
-    {
-        ESS_SIGNING_CERT *sc = ESS_SIGNING_CERT_new();
-        ESS_CERT_ID *cid;
-        X509 *x;
-
-        if (!sc) goto attr_fail;
-
-        /* Compute SHA1 of signing cert DER */
-        if (EVP_Digest(cert->cert_info, i2d_X509_CERT_INFO(cert->cert_info, NULL),
-                        cert_sha1, &cert_sha1_len, EVP_sha1(), NULL) != 1) {
-            ESS_SIGNING_CERT_free(sc); goto attr_fail;
-        }
-
-        cid = ESS_CERT_ID_new();
-        if (!cid) { ESS_SIGNING_CERT_free(sc); goto attr_fail; }
-
-        ASN1_OCTET_STRING_set(cid->hash, cert_sha1, cert_sha1_len);
-
-        /* issuer_and_serial from cert */
-        cid->issuer_serial->issuer->type = V_ASN1_SEQUENCE;
-        x = cert;
-        i2d_X509(x, &cid->issuer_serial->issuer->value.asn1_string->data);
-        cid->issuer_serial->issuer->value.asn1_string->length =
-            i2d_X509(x, NULL);
-        ASN1_INTEGER_set(cid->issuer_serial->serial,
-                          ASN1_INTEGER_get(X509_get_serialNumber(cert)));
-
-        sk_ESS_CERT_ID_push(sc->cert_ids, cid);
-
-        /* Add signing-certificate attribute */
-        X509at_add1_attr(&auth_attr,
-            X509_ATTRIBUTE_create(OBJ_txt2nid(SPC_STATEMENT_TYPE_OID),
-                                  V_ASN1_SEQUENCE, NULL));
-        /* Actually we need a different approach for ESS signing-certificate */
-        ESS_SIGNING_CERT_free(sc);
-    }
-
-    /* 8. DER-encode authenticated attributes (as SET OF) */
-    {
-        /* Temporarily set the type field so i2d encodes as SET */
-        int attr_type = auth_attr->type;
-        auth_attr->type = V_ASN1_SET;
-        der_len = (size_t)i2d_ASN1_SET_ANY(auth_attr, NULL);
-        if (der_len <= 0) goto attr_fail;
-        der_attrs = (unsigned char *)OPENSSL_malloc(der_len);
-        if (!der_attrs) goto attr_fail;
+        DerBuf alg;
+        db_init(&alg);
+        db_der_oid_nid(&alg, NID_sha256);
+        db_der_null(&alg);
         {
-            unsigned char *p = der_attrs;
-            i2d_ASN1_SET_ANY(auth_attr, &p);
+            DerBuf alg_seq;
+            db_init(&alg_seq);
+            db_der_seq(&alg_seq, alg.data, alg.len);
+            DerBuf alg_set;
+            db_init(&alg_set);
+            db_der_set(&alg_set, alg_seq.data, alg_seq.len);
+            db_raw(&signed_data, alg_set.data, alg_set.len);
+            db_free(&alg_set);
+            db_free(&alg_seq);
         }
-        auth_attr->type = attr_type;
+        db_free(&alg);
     }
 
-    /* 9. Sign the DER-encoded authenticated attributes */
+    /* 3. contentInfo = SEQUENCE { OID(SPC_PE_IMAGE_DATA) } */
     {
-        size_t sig_len;
-
-        mdctx = EVP_MD_CTX_new();
-        if (!mdctx) goto attr_fail;
-
-        if (EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, pkey) != 1 ||
-            EVP_DigestSignUpdate(mdctx, der_attrs, der_len) != 1 ||
-            EVP_DigestSignFinal(mdctx, NULL, &sig_len) != 1) {
-            EVP_MD_CTX_free(mdctx); goto attr_fail;
-        }
-
-        sig = (unsigned char *)OPENSSL_malloc(sig_len);
-        if (!sig) { EVP_MD_CTX_free(mdctx); goto attr_fail; }
-
-        if (EVP_DigestSignFinal(mdctx, sig, &sig_len) != 1) {
-            EVP_MD_CTX_free(mdctx); goto attr_fail;
-        }
-        EVP_MD_CTX_free(mdctx);
-        mdctx = NULL;
-
-        /* Set encrypted digest on SignerInfo */
-        if (!ASN1_STRING_set(si->enc_digest, sig, (int)sig_len))
-            goto attr_fail;
+        DerBuf ci;
+        db_init(&ci);
+        db_der_oid_str(&ci, SPC_PE_IMAGE_DATA_OID);
+        DerBuf ci_seq;
+        db_init(&ci_seq);
+        db_der_seq(&ci_seq, ci.data, ci.len);
+        db_raw(&signed_data, ci_seq.data, ci_seq.len);
+        db_free(&ci_seq);
+        db_free(&ci);
     }
 
-    /* 10. Attach authenticated attributes to SignerInfo */
-    si->auth_attr = auth_attr;
-    auth_attr = NULL; /* ownership transferred */
-
-    /* 11. Add SignerInfo to SignedData */
-    if (!sk_PKCS7_SIGNER_INFO_push(p7->d.sign->signer_info, si)) {
-        PKCS7_SIGNER_INFO_free(si);
-        goto fail;
-    }
-    si = NULL; /* ownership transferred */
-
-    /* 12. Set digest algorithm in SignedData */
+    /* 4. certificates [0] IMPLICIT SET OF { cert, [ca certs] } */
     {
-        X509_ALGOR *alg = X509_ALGOR_new();
-        if (!alg) goto fail;
-        X509_ALGOR_set0(alg, OBJ_nid2obj(NID_sha256), V_ASN1_NULL, NULL);
-        sk_X509_ALGOR_push(p7->d.sign->md_algs, alg);
+        DerBuf certs;
+        db_init(&certs);
+
+        /* Add signing cert */
+        cert_der_len = i2d_X509(cert, &cert_der);
+        if (cert_der_len <= 0 || !cert_der) {
+            db_free(&signed_data); return NULL;
+        }
+        db_raw(&certs, cert_der, (size_t)cert_der_len);
+
+        /* Add CA chain certs */
+        if (ca_chain) {
+            for (int i = 0; i < sk_X509_num(ca_chain); i++) {
+                unsigned char *ca_der = NULL;
+                int ca_len = i2d_X509(sk_X509_value(ca_chain, i), &ca_der);
+                if (ca_len > 0 && ca_der) {
+                    db_raw(&certs, ca_der, (size_t)ca_len);
+                    OPENSSL_free(ca_der);
+                }
+            }
+        }
+
+        /* [0] IMPLICIT SET OF — tag 0xA0 (context-specific, constructed) */
+        db_tag(&signed_data, 0xA0, certs.len);
+        db_raw(&signed_data, certs.data, certs.len);
+        db_free(&certs);
     }
 
-    OPENSSL_free(der_attrs);
-    OPENSSL_free(sig);
+    /* 5. Build authenticated attributes and sign */
+    {
+        DerBuf auth_attrs;
+        if (!build_auth_attrs_der(pe_hash, pe_hash_len,
+                                   cert_der, cert_der_len, &auth_attrs)) {
+            OPENSSL_free(cert_der); db_free(&signed_data); return NULL;
+        }
+        OPENSSL_free(cert_der); cert_der = NULL;
 
-    return p7;
+        der_attrs = auth_attrs.data;
+        /* Don't free auth_attrs — we own der_attrs now */
+        auth_attrs.data = NULL;
 
-attr_fail:
-    if (auth_attr) sk_X509_ATTRIBUTE_pop_free(auth_attr, X509_ATTRIBUTE_free);
-fail:
-    if (der_attrs) OPENSSL_free(der_attrs);
-    if (sig) OPENSSL_free(sig);
-    if (mdctx) EVP_MD_CTX_free(mdctx);
-    if (si) PKCS7_SIGNER_INFO_free(si);
-    PKCS7_free(p7);
-    return NULL;
+        /* Sign the DER-encoded attrs */
+        if (!sign_attrs(der_attrs, auth_attrs.len, pkey, &sig, &sig_len)) {
+            OPENSSL_free(der_attrs); db_free(&signed_data); return NULL;
+        }
+
+        /* signerInfos */
+        {
+            DerBuf si;
+            db_init(&si);
+
+            /* version = 1 */
+            db_der_int(&si, 1);
+
+            /* issuerAndSerialNumber */
+            {
+                X509_NAME *issuer = X509_get_issuer_name(cert);
+                ASN1_INTEGER *serial = X509_get_serialNumber(cert);
+
+                DerBuf isn;
+                db_init(&isn);
+                /* issuer */
+                {
+                    unsigned char *name_der = NULL;
+                    int name_len = i2d_X509_NAME(issuer, &name_der);
+                    if (name_len > 0 && name_der) {
+                        db_raw(&isn, name_der, (size_t)name_len);
+                        OPENSSL_free(name_der);
+                    }
+                }
+                /* serial */
+                {
+                    DerBuf ser;
+                    db_init(&ser);
+                    db_der_int(&ser, ASN1_INTEGER_get(serial));
+                    db_raw(&isn, ser.data, ser.len);
+                    db_free(&ser);
+                }
+                db_raw(&si, isn.data, isn.len);
+                db_free(&isn);
+            }
+
+            /* digestAlgorithm = SHA256 */
+            {
+                DerBuf alg;
+                db_init(&alg);
+                db_der_oid_nid(&alg, NID_sha256);
+                db_der_null(&alg);
+                DerBuf alg_seq;
+                db_init(&alg_seq);
+                db_der_seq(&alg_seq, alg.data, alg.len);
+                db_raw(&si, alg_seq.data, alg_seq.len);
+                db_free(&alg_seq);
+                db_free(&alg);
+            }
+
+            /* authenticatedAttributes [0] IMPLICIT SET OF */
+            db_tag(&si, 0xA0, auth_attrs.len);
+            db_raw(&si, der_attrs, auth_attrs.len);
+            db_free(&auth_attrs);
+
+            /* digestEncryptionAlgorithm = RSA-SHA256 */
+            {
+                DerBuf enc_alg;
+                db_init(&enc_alg);
+                db_der_oid_nid(&enc_alg, NID_rsaEncryption);
+                db_der_null(&enc_alg);
+                DerBuf enc_seq;
+                db_init(&enc_seq);
+                db_der_seq(&enc_seq, enc_alg.data, enc_alg.len);
+                db_raw(&si, enc_seq.data, enc_seq.len);
+                db_free(&enc_seq);
+                db_free(&enc_alg);
+            }
+
+            /* encryptedDigest */
+            db_der_octet_string(&si, sig, sig_len);
+            OPENSSL_free(sig); sig = NULL;
+
+            /* signerInfos ::= SET OF { SignerInfo } */
+            {
+                DerBuf si_seq;
+                db_init(&si_seq);
+                db_der_seq(&si_seq, si.data, si.len);
+                DerBuf si_set;
+                db_init(&si_set);
+                db_der_set(&si_set, si_seq.data, si_seq.len);
+                db_raw(&signed_data, si_set.data, si_set.len);
+                db_free(&si_set);
+                db_free(&si_seq);
+            }
+            db_free(&si);
+        }
+    }
+
+    /* 6. Wrap as ContentInfo: SEQUENCE { OID(pkcs7-signedData), [0] { signedData } } */
+    {
+        DerBuf ci;
+        db_init(&ci);
+        /* ContentInfo OID */
+        db_der_oid_nid(&ci, NID_pkcs7_signedData);
+
+        /* [0] EXPLICIT — wrap SignedData in its own SEQUENCE first */
+        {
+            DerBuf sd_seq;
+            db_init(&sd_seq);
+            db_der_seq(&sd_seq, signed_data.data, signed_data.len);
+
+            db_tag(&ci, 0xA0, sd_seq.len);
+            db_raw(&ci, sd_seq.data, sd_seq.len);
+            db_free(&sd_seq);
+        }
+
+        /* Final outer SEQUENCE */
+        {
+            DerBuf outer;
+            db_init(&outer);
+            db_der_seq(&outer, ci.data, ci.len);
+
+            *out_len = (int)outer.len;
+            unsigned char *result = (unsigned char *)OPENSSL_malloc(outer.len);
+            if (result) memcpy(result, outer.data, outer.len);
+            db_free(&outer);
+            db_free(&ci);
+            db_free(&signed_data);
+            if (der_attrs) OPENSSL_free(der_attrs);
+            if (sig) OPENSSL_free(sig);
+            return result;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
 /* Serialize PKCS7 to DER and attach to PE                            */
 /* ------------------------------------------------------------------ */
-static int attach_pkcs7_to_pe(PE_FILE *pe, PKCS7 *p7,
-                               const char *output_path)
+
+static int attach_pkcs7_to_pe(PE_FILE *pe, const unsigned char *der,
+                                int der_len, const char *output_path)
 {
-    unsigned char *der = NULL;
-    int der_len;
-    int ret;
-
-    der_len = i2d_PKCS7(p7, &der);
-    if (der_len <= 0 || !der) return 0;
-
     /* Attach signature to PE */
-    if (!pe_attach_signature(pe, der, (uint32_t)der_len)) {
-        OPENSSL_free(der);
+    if (!pe_attach_signature(pe, der, (uint32_t)der_len))
         return 0;
-    }
-    OPENSSL_free(der);
 
     /* Recalculate checksum */
     pe_recalc_checksum(pe);
 
     /* Save */
-    ret = pe_save(pe, output_path);
-    return ret;
+    return pe_save(pe, output_path);
 }
 
 /* ------------------------------------------------------------------ */
@@ -307,7 +619,8 @@ int authenticode_sign(const char *pe_path,
     X509 *cert = NULL;
     STACK_OF(X509) *ca_chain = NULL;
     PE_FILE *pe = NULL;
-    PKCS7 *p7 = NULL;
+    unsigned char *pkcs7_der = NULL;
+    int pkcs7_len = 0;
     unsigned char pe_hash[EVP_MAX_MD_SIZE];
     unsigned int pe_hash_len = 0;
     int ret = 0;
@@ -334,16 +647,17 @@ int authenticode_sign(const char *pe_path,
         goto cleanup;
     }
 
-    /* Build PKCS#7 SignedData */
-    p7 = build_authenticode_pkcs7(pkey, cert, ca_chain, pe_hash, pe_hash_len);
-    if (!p7) {
+    /* Build PKCS#7 SignedData as DER */
+    pkcs7_der = build_authenticode_pkcs7(pkey, cert, ca_chain,
+                                          pe_hash, pe_hash_len, &pkcs7_len);
+    if (!pkcs7_der) {
         fprintf(stderr, "Failed to build Authenticode PKCS#7\n");
         goto cleanup;
     }
 
     /* Attach to PE and save */
     out = output_path ? output_path : pe_path;
-    if (!attach_pkcs7_to_pe(pe, p7, out)) {
+    if (!attach_pkcs7_to_pe(pe, pkcs7_der, pkcs7_len, out)) {
         fprintf(stderr, "Failed to save signed PE\n");
         goto cleanup;
     }
@@ -352,7 +666,7 @@ int authenticode_sign(const char *pe_path,
     ret = 1;
 
 cleanup:
-    if (p7) PKCS7_free(p7);
+    if (pkcs7_der) OPENSSL_free(pkcs7_der);
     if (pe) pe_free(pe);
     if (cert) X509_free(cert);
     if (pkey) EVP_PKEY_free(pkey);
@@ -387,7 +701,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
     }
 
     /* Parse PKCS#7 */
-    bio = BIO_new_mem_buf(sig_der, sig_len);
+    bio = BIO_new_mem_buf(sig_der, (int)sig_len);
     if (!bio) goto cleanup;
     p7 = d2i_PKCS7_bio(bio, NULL);
     if (!p7) {
@@ -411,12 +725,14 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         }
         /* Check if CA cert is in the PKCS7 cert stack */
         int found = 0;
-        if (p7->d.sign && p7->d.sign->cert) {
-            for (int i = 0; i < sk_X509_num(p7->d.sign->cert); i++) {
-                if (X509_cmp(sk_X509_value(p7->d.sign->cert, i), ca_cert) == 0) {
+        STACK_OF(X509) *certs = PKCS7_get0_signers(p7, NULL, 0);
+        if (certs) {
+            for (int i = 0; i < sk_X509_num(certs); i++) {
+                if (X509_cmp(sk_X509_value(certs, i), ca_cert) == 0) {
                     found = 1; break;
                 }
             }
+            sk_X509_free(certs);
         }
         X509_free(ca_cert);
         if (!found) {
@@ -433,14 +749,14 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
 
     /* Extract message-digest from authenticated attributes */
     {
-        PKCS7_SIGNER_INFO *si = sk_PKCS7_SIGNER_INFO_value(p7->d.sign->signer_info, 0);
-        if (!si || !si->auth_attr) {
-            fprintf(stderr, "No signer info or authenticated attributes\n");
+        PKCS7_SIGNER_INFO *si = sk_PKCS7_SIGNER_INFO_value(
+            PKCS7_get_signer_info(p7), 0);
+        if (!si) {
+            fprintf(stderr, "No signer info found\n");
             goto cleanup;
         }
 
-        /* Find messageDigest attribute */
-        int msg_digest_nid = OBJ_txt2nid("1.2.840.113549.1.9.4"); /* pkcs9-messageDigest */
+        int msg_digest_nid = OBJ_txt2nid("1.2.840.113549.1.9.4");
         X509_ATTRIBUTE *md_attr = PKCS7_get_signed_attribute(si, msg_digest_nid);
         if (!md_attr) {
             fprintf(stderr, "No messageDigest attribute found\n");
@@ -453,9 +769,9 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
             goto cleanup;
         }
 
-        /* Compare hashes */
-        if (md_val->value.octet_string->length != (int)pe_hash_len ||
-            memcmp(md_val->value.octet_string->data, pe_hash, pe_hash_len) != 0) {
+        ASN1_OCTET_STRING *os = md_val->value.octet_string;
+        if (os->length != (int)pe_hash_len ||
+            memcmp(os->data, pe_hash, pe_hash_len) != 0) {
             fprintf(stderr, "PE hash mismatch — file has been modified!\n");
             goto cleanup;
         }

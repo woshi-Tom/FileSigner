@@ -358,8 +358,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessage(g_hLog, LB_RESETCONTENT, 0, 0);
             log_message(g_hLog, "Starting signing process...");
 
-            OpenSSL_add_all_algorithms();
-
             SignProgressCtx ctx = { g_hProgress, g_hLog, hBtn };
             int count;
 
@@ -386,8 +384,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             log_message(g_hLog, "Finished. Signed %d file(s).", count);
 
-            EVP_cleanup();
-            CRYPTO_cleanup_all_ex_data();
             EnableWindow(hBtn, TRUE);
         }
 
@@ -413,9 +409,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             EnableWindow(hBtn, FALSE);
             SetDlgItemTextA(hwnd, IDC_LBL_CERT_STATUS, "Generating...");
 
-            OpenSSL_add_all_algorithms();
-            ERR_load_crypto_strings();
-
             if (cert_generate(dir, NULL, "FileSigner", days)) {
                 char msg[512];
                 snprintf(msg, sizeof(msg),
@@ -431,9 +424,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 MessageBoxA(hwnd, "Certificate generation failed.", "Error", MB_OK | MB_ICONERROR);
             }
 
-            EVP_cleanup();
-            CRYPTO_cleanup_all_ex_data();
-            ERR_free_strings();
             EnableWindow(hBtn, TRUE);
         }
 

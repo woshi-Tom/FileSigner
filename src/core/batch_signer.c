@@ -1,16 +1,15 @@
 #include "batch_signer.h"
 #include "authenticode.h"
-#include "file_utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <windows.h>
 #define PATH_SEP '\\'
 #else
+#include <dirent.h>
+#include <sys/stat.h>
 #define PATH_SEP '/'
 #endif
 
@@ -55,6 +54,35 @@ static int pe_list_add(PEList *list, const char *path)
 /* Scan directory for .exe files */
 static void scan_directory(const char *dir_path, int recursive, PEList *list)
 {
+#ifdef _WIN32
+    char search_pattern[MAX_PATH_LEN];
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind;
+
+    snprintf(search_pattern, sizeof(search_pattern), "%s\\*", dir_path);
+    hFind = FindFirstFileA(search_pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+            continue;
+
+        char fullpath[MAX_PATH_LEN];
+        snprintf(fullpath, sizeof(fullpath), "%s\\%s", dir_path, fd.cFileName);
+
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (recursive)
+                scan_directory(fullpath, recursive, list);
+        } else {
+            const char *ext = strrchr(fd.cFileName, '.');
+            if (ext && _stricmp(ext, ".exe") == 0) {
+                pe_list_add(list, fullpath);
+            }
+        }
+    } while (FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+#else
     DIR *dir;
     struct dirent *entry;
     char fullpath[MAX_PATH_LEN];
@@ -66,7 +94,7 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
-        snprintf(fullpath, sizeof(fullpath), "%s%c%s", dir_path, PATH_SEP, entry->d_name);
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir_path, entry->d_name);
 
         struct stat st;
         if (stat(fullpath, &st) != 0) continue;
@@ -75,15 +103,14 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
             if (recursive)
                 scan_directory(fullpath, recursive, list);
         } else if (S_ISREG(st.st_mode)) {
-            /* Check if .exe extension */
             const char *ext = strrchr(entry->d_name, '.');
-            if (ext && _stricmp(ext, ".exe") == 0) {
+            if (ext && strcasecmp(ext, ".exe") == 0) {
                 pe_list_add(list, fullpath);
             }
         }
     }
-
     closedir(dir);
+#endif
 }
 
 /* ------------------------------------------------------------------ */
