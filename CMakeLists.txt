@@ -4,84 +4,77 @@ project(FileSigner C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# ÉèÖÃ±àÒëÑ¡Ïî
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 -Wall -Wextra")
+# Compiler flags
+if(MSVC)
+    add_compile_options(/W3 /O2)
 else()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall")
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 -Wall -Wextra")
+    else()
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall")
+    endif()
 endif()
 
-# ²éÕÒ OpenSSL
-find_package(OpenSSL REQUIRED)
-
+# Find OpenSSL (3.x required â€” 1.x is EOL with known CVEs)
+find_package(OpenSSL 3.0 REQUIRED)
 if(NOT OpenSSL_FOUND)
-    message(FATAL_ERROR "OpenSSL not found")
+    message(FATAL_ERROR "OpenSSL 3.x not found. Install via: vcpkg install openssl:x64-windows")
 endif()
+message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} at ${OPENSSL_INCLUDE_DIR}")
 
-message(STATUS "Found OpenSSL: ${OPENSSL_INCLUDE_DIR}")
-
-# °üº¬Ä¿Â¼
+# Include directories
 include_directories(
     src/include
     ${OPENSSL_INCLUDE_DIR}
 )
 
-# Ô´´úÂëÎÄ¼þ
-set(SOURCE_FILES
-    src/main/file_signer.c
-    src/main/verify_sig.c
-    src/utils/file_utils.c
-    src/utils/crypto_utils.c
+# Core source files
+set(CORE_SOURCES
+    src/core/pe_file.c
+    src/core/authenticode.c
+    src/core/cert_gen.c
+    src/core/timestamp.c
+    src/core/batch_signer.c
 )
 
-# Ö÷¿ÉÖ´ÐÐÎÄ¼þ£ºfile_signer
-add_executable(file_signer
-    src/main/file_signer.c
+# Utility source files
+set(UTIL_SOURCES
     src/utils/file_utils.c
-    src/utils/crypto_utils.c
- "src/include/signature_format.h" "src/utils/signature_utils.c")
-
-target_link_libraries(file_signer OpenSSL::Crypto)
-
-# ÑéÖ¤¹¤¾ß¿ÉÖ´ÐÐÎÄ¼þ£ºverify_sig
-add_executable(verify_sig
-    src/main/verify_sig.c
-    src/utils/file_utils.c
-    src/utils/crypto_utils.c
- "src/include/signature_format.h" "src/utils/signature_utils.c")
-
-target_link_libraries(verify_sig OpenSSL::Crypto)
-
-# °²×°Ä¿±ê
-install(TARGETS file_signer verify_sig
-    DESTINATION bin
 )
 
-# ¿ÉÑ¡£º¾²Ì¬Á´½Ó°æ±¾
-if(BUILD_STATIC)
-    add_executable(file_signer_static
-        src/main/file_signer.c
-        src/utils/file_utils.c
-        src/utils/crypto_utils.c
-    )
-    
-    target_link_libraries(file_signer_static OpenSSL::Crypto)
-    set_target_properties(file_signer_static PROPERTIES
-        LINK_FLAGS "-static"
-    )
+# CLI executable
+add_executable(filesigner_cli
+    src/main/cli.c
+    ${CORE_SOURCES}
+    ${UTIL_SOURCES}
+)
+set_target_properties(filesigner_cli PROPERTIES OUTPUT_NAME "filesigner")
+target_link_libraries(filesigner_cli OpenSSL::Crypto)
+
+if(WIN32)
+    target_link_libraries(filesigner_cli winhttp crypt32)
 endif()
 
-# ²âÊÔÄ¿±ê
-if(BUILD_TESTS)
-    enable_testing()
-    
-    add_executable(test_filesigner
-        test/test_main.c
-        src/utils/file_utils.c
-        src/utils/crypto_utils.c
+# GUI executable (Windows only)
+if(WIN32)
+    add_executable(filesigner_gui
+        src/gui/gui_main.c
+        ${CORE_SOURCES}
+        ${UTIL_SOURCES}
     )
-    
-    target_link_libraries(test_filesigner OpenSSL::Crypto)
-    
-    add_test(NAME test_filesigner COMMAND test_filesigner)
+    set_target_properties(filesigner_gui PROPERTIES
+        OUTPUT_NAME "filesigner_gui"
+        WIN32_EXECUTABLE TRUE
+    )
+    target_link_libraries(filesigner_gui OpenSSL::Crypto winhttp comctl32 ole32)
+endif()
+
+# Install
+install(TARGETS filesigner_cli
+    DESTINATION bin
+)
+if(WIN32)
+    install(TARGETS filesigner_gui
+        DESTINATION bin
+    )
 endif()
