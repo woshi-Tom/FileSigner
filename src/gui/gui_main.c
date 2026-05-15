@@ -448,7 +448,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 /* Entry point                                                         */
 /* ------------------------------------------------------------------ */
 
-int gui_main(void)
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                    LPSTR lpCmdLine, int nCmdShow)
 {
     WNDCLASSA wc;
     HWND hwnd;
@@ -462,7 +463,8 @@ int gui_main(void)
 
     CoInitialize(NULL);
 
-    g_hInst = GetModuleHandleA(NULL);
+    g_hInst = hInstance;
+    (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
 
     /* Register window class */
     memset(&wc, 0, sizeof(wc));

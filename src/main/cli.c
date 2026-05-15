@@ -15,7 +15,7 @@ static void print_usage(const char *prog)
     printf("  %s --generate-cert [options]\n", prog);
     printf("  %s --sign <file|dir> --pfx <pfx> [options]\n", prog);
     printf("  %s --verify <file> [--ca <cert>]\n", prog);
-    printf("  %s --gui\n\n", prog);
+    printf("  %s --gui        (use filesigner_gui.exe for GUI)\n\n", prog);
     printf("Certificate Generation:\n");
     printf("  --out-dir <dir>          Output directory (default: ./certs)\n");
     printf("  --ca-password <pw>       CA key password (default: none)\n");
@@ -42,13 +42,6 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
-    }
-
-    /* Check for --gui flag */
-    if (strcmp(argv[1], "--gui") == 0) {
-        /* Launch GUI - implemented in gui_main.c */
-        extern int gui_main(void);
-        return gui_main();
     }
 
     /* --generate-cert */
