@@ -12,6 +12,7 @@
 #include "authenticode.h"
 #include "batch_signer.h"
 #include "file_utils.h"
+#include "resource.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -82,22 +83,6 @@ static BOOL browse_file(HWND hwnd, const char *filter, const char *title,
     return GetOpenFileNameA(&ofn);
 }
 
-static BOOL browse_save_file(HWND hwnd, const char *filter, const char *title,
-                              char *outpath, DWORD outsize)
-{
-    OPENFILENAMEA ofn;
-    memset(&ofn, 0, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = filter;
-    ofn.lpstrFile = outpath;
-    ofn.nMaxFile = outsize;
-    ofn.lpstrTitle = title;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-    outpath[0] = '\0';
-    return GetSaveFileNameA(&ofn);
-}
-
 static BOOL browse_folder(HWND hwnd, const char *title, char *outpath)
 {
     BROWSEINFOA bi;
@@ -114,7 +99,6 @@ static BOOL browse_folder(HWND hwnd, const char *title, char *outpath)
     return ret;
 }
 
-/* Create a Win32 control helper */
 static HWND make_ctrl(HWND parent, const char *cls, const char *text,
                        DWORD style, int x, int y, int w, int h, int id)
 {
@@ -125,7 +109,7 @@ static HWND make_ctrl(HWND parent, const char *cls, const char *text,
 }
 
 /* ------------------------------------------------------------------ */
-/* Sign page layout                                                    */
+/* Sign page                                                           */
 /* ------------------------------------------------------------------ */
 
 static void create_sign_page(HWND parent)
@@ -136,50 +120,50 @@ static void create_sign_page(HWND parent)
 
     int y = 10;
 
-    /* Target file/dir */
-    make_ctrl(g_hPageSign, "STATIC", "Target (file or directory):", 0, 0, y, 160, 20, 0);
+    /* Target */
+    make_ctrl(g_hPageSign, "STATIC", "目标 (文件或目录):", 0, 0, y, 160, 20, 0);
     y += 20;
     make_ctrl(g_hPageSign, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL, 0, y, 450, 24, IDC_EDIT_TARGET);
-    make_ctrl(g_hPageSign, "BUTTON", "Browse...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_TGT);
+    make_ctrl(g_hPageSign, "BUTTON", "浏览...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_TGT);
     y += 32;
 
-    /* PFX file */
-    make_ctrl(g_hPageSign, "STATIC", "PFX certificate file:", 0, 0, y, 160, 20, 0);
+    /* PFX */
+    make_ctrl(g_hPageSign, "STATIC", "PFX 证书文件:", 0, 0, y, 160, 20, 0);
     y += 20;
     make_ctrl(g_hPageSign, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL, 0, y, 450, 24, IDC_EDIT_PFX);
-    make_ctrl(g_hPageSign, "BUTTON", "Browse...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_PFX);
+    make_ctrl(g_hPageSign, "BUTTON", "浏览...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_PFX);
     y += 32;
 
     /* Password */
-    make_ctrl(g_hPageSign, "STATIC", "PFX password:", 0, 0, y, 160, 20, 0);
+    make_ctrl(g_hPageSign, "STATIC", "PFX 密码:", 0, 0, y, 160, 20, 0);
     y += 20;
     make_ctrl(g_hPageSign, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD, 0, y, 300, 24, IDC_EDIT_PASSWORD);
     y += 32;
 
-    /* Timestamp URL */
-    make_ctrl(g_hPageSign, "STATIC", "Timestamp server URL (optional):", 0, 0, y, 250, 20, 0);
+    /* Timestamp */
+    make_ctrl(g_hPageSign, "STATIC", "时间戳服务器 URL (可选):", 0, 0, y, 250, 20, 0);
     y += 20;
     make_ctrl(g_hPageSign, "EDIT", "http://timestamp.digicert.com",
               WS_BORDER | ES_AUTOHSCROLL, 0, y, 450, 24, IDC_EDIT_TIMESTAMP);
     y += 32;
 
     /* Output dir */
-    make_ctrl(g_hPageSign, "STATIC", "Output directory (optional, blank = overwrite):", 0, 0, y, 320, 20, 0);
+    make_ctrl(g_hPageSign, "STATIC", "输出目录 (可选, 留空 = 覆盖原文件):", 0, 0, y, 320, 20, 0);
     y += 20;
     make_ctrl(g_hPageSign, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL, 0, y, 450, 24, IDC_EDIT_OUTDIR);
-    make_ctrl(g_hPageSign, "BUTTON", "Browse...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_OUT);
+    make_ctrl(g_hPageSign, "BUTTON", "浏览...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_OUT);
     y += 32;
 
     /* Checkboxes */
-    make_ctrl(g_hPageSign, "BUTTON", "Recursive (scan subdirectories)",
+    make_ctrl(g_hPageSign, "BUTTON", "包含子目录",
               BS_AUTOCHECKBOX, 0, y, 300, 20, IDC_CHK_RECURSIVE);
     y += 24;
-    make_ctrl(g_hPageSign, "BUTTON", "Force re-sign already signed files",
+    make_ctrl(g_hPageSign, "BUTTON", "强制重新签名已签名的文件",
               BS_AUTOCHECKBOX, 0, y, 300, 20, IDC_CHK_FORCE);
     y += 32;
 
     /* Sign button */
-    make_ctrl(g_hPageSign, "BUTTON", "Sign Files",
+    make_ctrl(g_hPageSign, "BUTTON", "开始签名",
               BS_DEFPUSHBUTTON, 0, y, 120, 32, IDC_BTN_SIGN);
     y += 40;
 
@@ -195,7 +179,7 @@ static void create_sign_page(HWND parent)
 }
 
 /* ------------------------------------------------------------------ */
-/* Certificate generation page layout                                  */
+/* Certificate generation page                                          */
 /* ------------------------------------------------------------------ */
 
 static void create_cert_page(HWND parent)
@@ -207,28 +191,28 @@ static void create_cert_page(HWND parent)
     int y = 10;
 
     make_ctrl(g_hPageCert, "STATIC",
-              "Generate FileSigner certificates (Root CA + Code Signing).\n"
-              "Import the Root CA into Windows Trusted Root store to trust signed files.",
+              "生成 FileSigner 证书 (根 CA + 代码签名证书)。\n"
+              "将根 CA 导入 Windows 受信任根存储即可信任签名后的文件。",
               0, 0, y, 550, 40, 0);
     y += 50;
 
     /* Output directory */
-    make_ctrl(g_hPageCert, "STATIC", "Output directory:", 0, 0, y, 160, 20, 0);
+    make_ctrl(g_hPageCert, "STATIC", "输出目录:", 0, 0, y, 160, 20, 0);
     y += 20;
     make_ctrl(g_hPageCert, "EDIT", "./certs", WS_BORDER | ES_AUTOHSCROLL,
               0, y, 450, 24, IDC_EDIT_CERT_DIR);
-    make_ctrl(g_hPageCert, "BUTTON", "Browse...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_CD);
+    make_ctrl(g_hPageCert, "BUTTON", "浏览...", 0, 460, y, 90, 24, IDC_BTN_BROWSE_CD);
     y += 32;
 
     /* Validity days */
-    make_ctrl(g_hPageCert, "STATIC", "Signer cert validity (days):", 0, 0, y, 200, 20, 0);
+    make_ctrl(g_hPageCert, "STATIC", "签名证书有效期 (天):", 0, 0, y, 200, 20, 0);
     y += 20;
     make_ctrl(g_hPageCert, "EDIT", "90", WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
               0, y, 100, 24, IDC_EDIT_CERT_DAYS);
     y += 32;
 
     /* Generate button */
-    make_ctrl(g_hPageCert, "BUTTON", "Generate Certificates",
+    make_ctrl(g_hPageCert, "BUTTON", "生成证书",
               BS_DEFPUSHBUTTON, 0, y, 180, 32, IDC_BTN_GENERATE);
     y += 40;
 
@@ -263,9 +247,9 @@ static void sign_progress_cb(const char *filename, int current, int total,
     SendMessage(ctx->hProgress, PBM_SETPOS, (WPARAM)(current * 100 / total), 0);
 
     if (success == 1)
-        log_message(ctx->hLog, "[OK] %s", filename);
+        log_message(ctx->hLog, "[成功] %s", filename);
     else if (success == 0)
-        log_message(ctx->hLog, "[SKIP/FAIL] %s", filename);
+        log_message(ctx->hLog, "[跳过/失败] %s", filename);
 
     MSG msg;
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -290,17 +274,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         TCITEMA tie;
         tie.mask = TCIF_TEXT;
-        tie.pszText = "Sign";
+        tie.pszText = "签名";
         TabCtrl_InsertItem(g_hTab, 0, &tie);
-        tie.pszText = "Generate Certificates";
+        tie.pszText = "生成证书";
         TabCtrl_InsertItem(g_hTab, 1, &tie);
 
-        /* Create pages */
         create_sign_page(hwnd);
         create_cert_page(hwnd);
         switch_tab(0);
 
-        /* Init common controls */
         SendMessage(g_hProgress, PBM_SETRANGE32, 0, 100);
 
         return 0;
@@ -319,21 +301,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     {
         int id = LOWORD(wParam);
 
-        /* --- Sign page controls --- */
+        /* --- Sign page --- */
         if (id == IDC_BTN_BROWSE_TGT) {
             char path[MAX_PATH] = {0};
-            if (browse_folder(hwnd, "Select target directory", path))
+            if (browse_folder(hwnd, "选择目标目录", path))
                 SetDlgItemTextA(hwnd, IDC_EDIT_TARGET, path);
         }
         else if (id == IDC_BTN_BROWSE_PFX) {
             char path[MAX_PATH] = {0};
-            if (browse_file(hwnd, "PFX Files\0*.pfx;*.p12\0All Files\0*.*\0",
-                            "Select PFX file", path, MAX_PATH))
+            if (browse_file(hwnd, "PFX 文件\0*.pfx;*.p12\0所有文件\0*.*\0",
+                            "选择 PFX 文件", path, MAX_PATH))
                 SetDlgItemTextA(hwnd, IDC_EDIT_PFX, path);
         }
         else if (id == IDC_BTN_BROWSE_OUT) {
             char path[MAX_PATH] = {0};
-            if (browse_folder(hwnd, "Select output directory", path))
+            if (browse_folder(hwnd, "选择输出目录", path))
                 SetDlgItemTextA(hwnd, IDC_EDIT_OUTDIR, path);
         }
         else if (id == IDC_BTN_SIGN) {
@@ -344,8 +326,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             GetDlgItemTextA(hwnd, IDC_EDIT_TIMESTAMP, ts_url, 512);
             GetDlgItemTextA(hwnd, IDC_EDIT_OUTDIR, outdir, MAX_PATH);
 
-            if (strlen(target) == 0) { MessageBoxA(hwnd, "Please select a target file or directory.", "Error", MB_OK | MB_ICONERROR); break; }
-            if (strlen(pfx) == 0) { MessageBoxA(hwnd, "Please select a PFX file.", "Error", MB_OK | MB_ICONERROR); break; }
+            if (strlen(target) == 0) { MessageBoxA(hwnd, "请选择目标文件或目录。", "错误", MB_OK | MB_ICONERROR); break; }
+            if (strlen(pfx) == 0) { MessageBoxA(hwnd, "请选择 PFX 文件。", "错误", MB_OK | MB_ICONERROR); break; }
 
             int recursive = IsDlgButtonChecked(hwnd, IDC_CHK_RECURSIVE) == BST_CHECKED;
             int force = IsDlgButtonChecked(hwnd, IDC_CHK_FORCE) == BST_CHECKED;
@@ -356,7 +338,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             EnableWindow(hBtn, FALSE);
             SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
             SendMessage(g_hLog, LB_RESETCONTENT, 0, 0);
-            log_message(g_hLog, "Starting signing process...");
+            log_message(g_hLog, "正在开始签名...");
 
             SignProgressCtx ctx = { g_hProgress, g_hLog, hBtn };
             int count;
@@ -367,30 +349,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                     ts, out, force, recursive,
                                     sign_progress_cb, &ctx);
             } else if (file_exists(target)) {
-                log_message(g_hLog, "Signing: %s", target);
+                log_message(g_hLog, "正在签名: %s", target);
                 if (authenticode_sign(target, pfx, password[0] ? password : NULL,
                                        ts, out ? out : target)) {
                     count = 1;
-                    log_message(g_hLog, "[OK] Done");
+                    log_message(g_hLog, "[成功] 签名完成");
                 } else {
                     count = 0;
-                    log_message(g_hLog, "[FAIL] Signing failed");
+                    log_message(g_hLog, "[失败] 签名失败");
                 }
                 SendMessage(g_hProgress, PBM_SETPOS, 100, 0);
             } else {
-                log_message(g_hLog, "Error: Target not found: %s", target);
+                log_message(g_hLog, "错误: 目标不存在: %s", target);
                 count = 0;
             }
 
-            log_message(g_hLog, "Finished. Signed %d file(s).", count);
+            log_message(g_hLog, "完成。已签名 %d 个文件。", count);
 
             EnableWindow(hBtn, TRUE);
         }
 
-        /* --- Cert page controls --- */
+        /* --- Cert page --- */
         else if (id == IDC_BTN_BROWSE_CD) {
             char path[MAX_PATH] = {0};
-            if (browse_folder(hwnd, "Select output directory", path))
+            if (browse_folder(hwnd, "选择输出目录", path))
                 SetDlgItemTextA(hwnd, IDC_EDIT_CERT_DIR, path);
         }
         else if (id == IDC_BTN_GENERATE) {
@@ -398,7 +380,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             GetDlgItemTextA(hwnd, IDC_EDIT_CERT_DIR, dir, MAX_PATH);
             GetDlgItemTextA(hwnd, IDC_EDIT_CERT_DAYS, days_str, 16);
 
-            if (strlen(dir) == 0) { MessageBoxA(hwnd, "Please select an output directory.", "Error", MB_OK | MB_ICONERROR); break; }
+            if (strlen(dir) == 0) { MessageBoxA(hwnd, "请选择输出目录。", "错误", MB_OK | MB_ICONERROR); break; }
 
             int days = atoi(days_str);
             if (days <= 0) days = 90;
@@ -407,21 +389,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             HWND hBtn = GetDlgItem(hwnd, IDC_BTN_GENERATE);
             EnableWindow(hBtn, FALSE);
-            SetDlgItemTextA(hwnd, IDC_LBL_CERT_STATUS, "Generating...");
+            SetDlgItemTextA(hwnd, IDC_LBL_CERT_STATUS, "正在生成...");
 
             if (cert_generate(dir, NULL, "FileSigner", days)) {
                 char msg[512];
                 snprintf(msg, sizeof(msg),
-                         "Certificates generated successfully!\n\n"
-                         "Files created in: %s\n\n"
-                         "IMPORTANT: Import FileSigner_RootCA.cer into\n"
-                         "Windows 'Trusted Root Certification Authorities'\n"
-                         "store to trust signed executables.", dir);
+                         "证书生成成功!\n\n"
+                         "生成文件位于: %s\n\n"
+                         "重要: 请将 FileSigner_RootCA.cer 导入\n"
+                         "Windows \"受信任的根证书颁发机构\"\n"
+                         "存储，以信任签名后的可执行文件。", dir);
                 SetDlgItemTextA(hwnd, IDC_LBL_CERT_STATUS, msg);
-                MessageBoxA(hwnd, msg, "Success", MB_OK | MB_ICONINFORMATION);
+                MessageBoxA(hwnd, msg, "成功", MB_OK | MB_ICONINFORMATION);
             } else {
-                SetDlgItemTextA(hwnd, IDC_LBL_CERT_STATUS, "Generation failed! Check console for details.");
-                MessageBoxA(hwnd, "Certificate generation failed.", "Error", MB_OK | MB_ICONERROR);
+                SetDlgItemTextA(hwnd, IDC_LBL_CERT_STATUS, "生成失败! 请查看控制台输出。");
+                MessageBoxA(hwnd, "证书生成失败。", "错误", MB_OK | MB_ICONERROR);
             }
 
             EnableWindow(hBtn, TRUE);
@@ -431,10 +413,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_SIZE:
-    {
-        /* Could handle resizing here */
         return 0;
-    }
 
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -445,17 +424,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 /* ------------------------------------------------------------------ */
-/* Entry point                                                         */
+/* GUI entry point                                                     */
 /* ------------------------------------------------------------------ */
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                    LPSTR lpCmdLine, int nCmdShow)
+int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+             LPSTR lpCmdLine, int nCmdShow)
 {
     WNDCLASSA wc;
     HWND hwnd;
     MSG msg;
 
-    /* Init common controls */
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_TAB_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES;
@@ -466,18 +444,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_hInst = hInstance;
     (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
 
-    /* Register window class */
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = WndProc;
     wc.hInstance = g_hInst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = "FileSignerGUI";
+    wc.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_MAIN_ICON));
     RegisterClassA(&wc);
 
-    /* Create main window */
     hwnd = CreateWindowExA(0, "FileSignerGUI",
-                            "FileSigner - Authenticode PE Signing Tool",
+                            "FileSigner - Authenticode PE 签名工具",
                             WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             600, 520,
@@ -488,7 +465,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
-    /* Message loop */
     while (GetMessage(&msg, NULL, 0, 0)) {
         if (!IsDialogMessage(hwnd, &msg)) {
             TranslateMessage(&msg);

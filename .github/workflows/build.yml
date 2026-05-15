@@ -28,9 +28,8 @@ jobs:
         run: |
           mkdir release
 
-          # Executables
+          # Executable (double-click = GUI, CLI args = CLI)
           cp build/Release/filesigner.exe release/
-          cp build/Release/filesigner_gui.exe release/
 
           # OpenSSL DLLs (manifest mode: vcpkg_installed in build dir)
           cp build/vcpkg_installed/x64-windows/bin/libcrypto-3-x64.dll release/

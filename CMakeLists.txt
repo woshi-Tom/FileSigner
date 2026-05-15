@@ -26,6 +26,7 @@ message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} at ${OPENSSL_INCLUDE_DIR}")
 # Include directories
 include_directories(
     src/include
+    res
     ${OPENSSL_INCLUDE_DIR}
 )
 
@@ -43,39 +44,35 @@ set(UTIL_SOURCES
     src/utils/file_utils.c
 )
 
-# CLI executable
-add_executable(filesigner_cli
+# Main source files
+set(MAIN_SOURCES
+    src/main/main.c
     src/main/cli.c
+    src/gui/gui_main.c
+)
+
+# Resource file (icon + version info)
+set(RESOURCE_FILES
+    res/resource.rc
+)
+
+# Single executable: double-click = GUI, command-line args = CLI
+add_executable(filesigner WIN32
+    ${MAIN_SOURCES}
     ${CORE_SOURCES}
     ${UTIL_SOURCES}
+    ${RESOURCE_FILES}
 )
-set_target_properties(filesigner_cli PROPERTIES OUTPUT_NAME "filesigner")
-target_link_libraries(filesigner_cli OpenSSL::Crypto)
 
-if(WIN32)
-    target_link_libraries(filesigner_cli winhttp crypt32)
-endif()
-
-# GUI executable (Windows only)
-if(WIN32)
-    add_executable(filesigner_gui
-        src/gui/gui_main.c
-        ${CORE_SOURCES}
-        ${UTIL_SOURCES}
-    )
-    set_target_properties(filesigner_gui PROPERTIES
-        OUTPUT_NAME "filesigner_gui"
-        WIN32_EXECUTABLE TRUE
-    )
-    target_link_libraries(filesigner_gui OpenSSL::Crypto winhttp comctl32 ole32)
-endif()
+target_link_libraries(filesigner
+    OpenSSL::Crypto
+    winhttp
+    crypt32
+    comctl32
+    ole32
+)
 
 # Install
-install(TARGETS filesigner_cli
+install(TARGETS filesigner
     DESTINATION bin
 )
-if(WIN32)
-    install(TARGETS filesigner_gui
-        DESTINATION bin
-    )
-endif()

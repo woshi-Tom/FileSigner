@@ -10,42 +10,41 @@
 
 static void print_usage(const char *prog)
 {
-    printf("FileSigner v%s - Authenticode PE Signing Tool\n\n", VERSION);
-    printf("Usage:\n");
-    printf("  %s --generate-cert [options]\n", prog);
-    printf("  %s --sign <file|dir> --pfx <pfx> [options]\n", prog);
-    printf("  %s --verify <file> [--ca <cert>]\n", prog);
-    printf("  %s --gui        (use filesigner_gui.exe for GUI)\n\n", prog);
-    printf("Certificate Generation:\n");
-    printf("  --out-dir <dir>          Output directory (default: ./certs)\n");
-    printf("  --ca-password <pw>       CA key password (default: none)\n");
-    printf("  --signer-password <pw>   PFX password (default: FileSigner)\n");
-    printf("  --validity-days <n>      Signer cert validity in days (default: 90)\n\n");
-    printf("Signing:\n");
-    printf("  --pfx <file>             PFX/P12 certificate file\n");
-    printf("  --password <pw>          PFX password\n");
-    printf("  --timestamp <url>        Timestamp server URL\n");
-    printf("  --output <dir>           Output directory (default: overwrite)\n");
-    printf("  --force                  Re-sign already-signed files\n");
-    printf("  --recursive              Scan subdirectories\n\n");
-    printf("Verification:\n");
-    printf("  --ca <file>              CA certificate for chain verification\n\n");
-    printf("Examples:\n");
-    printf("  %s --generate-cert --out-dir ./mycerts\n", prog);
-    printf("  %s --sign ./myapp.exe --pfx ./mycerts/FileSigner_Signer.pfx\n", prog);
-    printf("  %s --sign ./build --pfx cert.pfx --recursive --timestamp http://timestamp.digicert.com\n", prog);
-    printf("  %s --verify signed.exe --ca ./mycerts/FileSigner_RootCA.cer\n", prog);
+    printf("FileSigner v%s - Authenticode PE 签名工具\n\n", VERSION);
+    printf("用法:\n");
+    printf("  %s sign <文件|目录> --pfx <pfx> [选项]\n", prog);
+    printf("  %s gen-cert [选项]\n", prog);
+    printf("  %s verify <文件> [--ca <证书>]\n\n", prog);
+    printf("证书生成:\n");
+    printf("  --out-dir <目录>          输出目录 (默认: ./certs)\n");
+    printf("  --ca-password <密码>       CA 密钥密码 (默认: 无)\n");
+    printf("  --signer-password <密码>   PFX 密码 (默认: FileSigner)\n");
+    printf("  --validity-days <天数>     签名证书有效天数 (默认: 90)\n\n");
+    printf("签名:\n");
+    printf("  --pfx <文件>               PFX/P12 证书文件\n");
+    printf("  --password <密码>          PFX 密码\n");
+    printf("  --timestamp <URL>          时间戳服务器 URL\n");
+    printf("  --output <目录>            输出目录 (默认: 覆盖原文件)\n");
+    printf("  --force                    强制重新签名已签名的文件\n");
+    printf("  --recursive                扫描子目录\n\n");
+    printf("验证:\n");
+    printf("  --ca <文件>                CA 证书 (用于证书链验证)\n\n");
+    printf("示例:\n");
+    printf("  %s gen-cert --out-dir ./mycerts\n", prog);
+    printf("  %s sign ./myapp.exe --pfx ./mycerts/FileSigner_Signer.pfx\n", prog);
+    printf("  %s sign ./build --pfx cert.pfx --recursive --timestamp http://timestamp.digicert.com\n", prog);
+    printf("  %s verify signed.exe --ca ./mycerts/FileSigner_RootCA.cer\n", prog);
 }
 
-int main(int argc, char *argv[])
+int cli_main(int argc, char *argv[])
 {
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
     }
 
-    /* --generate-cert */
-    if (strcmp(argv[1], "--generate-cert") == 0) {
+    /* gen-cert */
+    if (strcmp(argv[1], "gen-cert") == 0) {
         const char *out_dir = "./certs";
         const char *ca_pw = NULL;
         const char *signer_pw = "FileSigner";
@@ -64,34 +63,34 @@ int main(int argc, char *argv[])
 
         if (!directory_exists(out_dir)) {
             if (!create_directory(out_dir)) {
-                fprintf(stderr, "Error: Cannot create output directory: %s\n", out_dir);
+                fprintf(stderr, "错误: 无法创建输出目录: %s\n", out_dir);
                 return 1;
             }
         }
 
-        printf("Generating certificates...\n");
+        printf("正在生成证书...\n");
         printf("  CA CN: %s\n", CERT_CA_CN);
-        printf("  Signer CN: %s (validity: %d days)\n", CERT_SIGNER_CN, validity);
-        printf("  Output: %s\n\n", out_dir);
+        printf("  签名者 CN: %s (有效期: %d 天)\n", CERT_SIGNER_CN, validity);
+        printf("  输出目录: %s\n\n", out_dir);
 
         if (cert_generate(out_dir, ca_pw, signer_pw, validity)) {
-            printf("\nCertificate generation successful!\n");
-            printf("\nNext steps:\n");
-            printf("  1. Import %s/FileSigner_RootCA.cer into Windows\n", out_dir);
-            printf("     'Trusted Root Certification Authorities' store\n");
-            printf("  2. Use FileSigner_Signer.pfx to sign your executables\n");
+            printf("\n证书生成成功!\n");
+            printf("\n下一步:\n");
+            printf("  1. 将 %s/FileSigner_RootCA.cer 导入 Windows\n", out_dir);
+            printf("     \"受信任的根证书颁发机构\" 存储\n");
+            printf("  2. 使用 FileSigner_Signer.pfx 对你的可执行文件签名\n");
         } else {
-            fprintf(stderr, "\nCertificate generation failed!\n");
+            fprintf(stderr, "\n证书生成失败!\n");
             return 1;
         }
 
         return 0;
     }
 
-    /* --sign */
-    if (strcmp(argv[1], "--sign") == 0) {
+    /* sign */
+    if (strcmp(argv[1], "sign") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "Error: --sign requires a file or directory argument\n");
+            fprintf(stderr, "错误: sign 需要指定文件或目录\n");
             print_usage(argv[0]);
             return 1;
         }
@@ -120,22 +119,20 @@ int main(int argc, char *argv[])
         }
 
         if (!pfx_path) {
-            fprintf(stderr, "Error: --pfx is required for signing\n");
+            fprintf(stderr, "错误: 签名需要 --pfx 参数\n");
             return 1;
         }
 
         int ret;
         if (directory_exists(target)) {
-            /* Batch sign */
             if (output_dir && !directory_exists(output_dir)) {
                 create_directory(output_dir);
             }
             int count = batch_sign(target, pfx_path, pfx_pw, ts_url,
                                     output_dir, force, recursive, NULL, NULL);
-            printf("\nSigned %d file(s)\n", count);
+            printf("\n已签名 %d 个文件\n", count);
             ret = (count > 0) ? 0 : 1;
         } else if (file_exists(target)) {
-            /* Single file sign */
             const char *out = target;
             char outbuf[4096];
             if (output_dir) {
@@ -147,17 +144,17 @@ int main(int argc, char *argv[])
             }
             ret = authenticode_sign(target, pfx_path, pfx_pw, ts_url, out) ? 0 : 1;
         } else {
-            fprintf(stderr, "Error: Target not found: %s\n", target);
+            fprintf(stderr, "错误: 目标不存在: %s\n", target);
             ret = 1;
         }
 
         return ret;
     }
 
-    /* --verify */
-    if (strcmp(argv[1], "--verify") == 0) {
+    /* verify */
+    if (strcmp(argv[1], "verify") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "Error: --verify requires a file argument\n");
+            fprintf(stderr, "错误: verify 需要指定文件\n");
             print_usage(argv[0]);
             return 1;
         }
@@ -170,18 +167,17 @@ int main(int argc, char *argv[])
                 ca_path = argv[++i];
         }
 
-        int ret = authenticode_verify(target, ca_path) ? 0 : 1;
-
-        return ret;
+        return authenticode_verify(target, ca_path) ? 0 : 1;
     }
 
-    /* Unknown command */
-    if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+    /* help */
+    if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0 ||
+        strcmp(argv[1], "help") == 0) {
         print_usage(argv[0]);
         return 0;
     }
 
-    fprintf(stderr, "Unknown command: %s\n", argv[1]);
+    fprintf(stderr, "未知命令: %s\n", argv[1]);
     print_usage(argv[0]);
     return 1;
 }
