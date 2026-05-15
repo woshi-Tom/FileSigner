@@ -137,14 +137,14 @@ static void apply_font(HWND parent)
 }
 
 static HWND make_ctrl(HWND parent, const wchar_t *cls, const wchar_t *text,
-                       DWORD style, int x, int y, int w, int h, int id)
+                       DWORD style, int x, int y, int w, int ht, int id)
 {
-    HWND h = CreateWindowExW(0, cls, text,
-                              WS_CHILD | WS_VISIBLE | style,
-                              x, y, w, h,
-                              parent, (HMENU)(INT_PTR)id, g_hInst, NULL);
-    SendMessageW(h, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-    return h;
+    HWND hw = CreateWindowExW(0, cls, text,
+                               WS_CHILD | WS_VISIBLE | style,
+                               x, y, w, ht,
+                               parent, (HMENU)(INT_PTR)id, g_hInst, NULL);
+    SendMessageW(hw, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    return hw;
 }
 
 /* ------------------------------------------------------------------ */
@@ -352,9 +352,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         TCITEMW tie;
         tie.mask = TCIF_TEXT;
         tie.pszText = L"  签名  ";
-        TabCtrl_InsertItemW(g_hTab, 0, &tie);
+        SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&tie);
         tie.pszText = L"  生成证书  ";
-        TabCtrl_InsertItemW(g_hTab, 1, &tie);
+        SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&tie);
 
         create_sign_page(hwnd);
         create_cert_page(hwnd);
@@ -499,7 +499,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                          L"证书生成成功!\n\n"
                          L"生成文件位于: %s\n\n"
                          L"请将 FileSigner_RootCA.cer 导入\n"
-                         L"Windows "受信任的根证书颁发机构"",
+                         L"Windows 受信任的根证书颁发机构",
                          wdir);
                 SetDlgItemTextW(hwnd, IDC_LBL_CERT_STATUS, msg);
                 MessageBoxW(hwnd, msg, L"成功", MB_OK | MB_ICONINFORMATION);
