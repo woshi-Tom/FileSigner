@@ -66,8 +66,9 @@ add_executable(filesigner
 
 if(MSVC)
     # Set Windows subsystem (entry point WinMain auto-detected)
+    # Disable CMake auto-manifest to avoid conflict with our custom manifest in resource.rc
     set_target_properties(filesigner PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS /MANIFEST:NO"
     )
 endif()
 
