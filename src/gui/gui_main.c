@@ -65,20 +65,37 @@ static HWND g_hTab;
 static HWND g_hPageSign, g_hPageCert;
 static HWND g_hProgress, g_hLog;
 
+/* Color scheme */
+static HBRUSH g_hbrBg;             /* main background */
+static HBRUSH g_hbrLogBg;          /* log area dark background */
+static HBRUSH g_hbrEditBg;         /* edit control background */
+static HBRUSH g_hbrBtnFace;        /* button/checkbox background */
+static COLORREF g_clrBg            = RGB(245, 247, 250);  /* light blue-gray */
+static COLORREF g_clrLogBg         = RGB(30, 30, 40);     /* dark background */
+static COLORREF g_clrLogText       = RGB(200, 220, 255);  /* light blue text */
+static COLORREF g_clrAccent        = RGB(0, 120, 215);    /* Windows blue */
+static COLORREF g_clrAccentHover   = RGB(0, 140, 240);    /* lighter blue hover */
+static COLORREF g_clrText          = RGB(30, 30, 30);     /* dark text */
+static COLORREF g_clrLabel         = RGB(60, 60, 70);     /* label text */
+static COLORREF g_clrEditBg        = RGB(255, 255, 255);  /* white */
+static COLORREF g_clrLogOK         = RGB(80, 200, 120);   /* green for [OK] */
+static COLORREF g_clrLogFail       = RGB(240, 80, 80);    /* red for [FAIL] */
+static COLORREF g_clrLogSkip       = RGB(180, 180, 190);  /* gray for [SKIP] */
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-static void wide_from_acp(const char *src, wchar_t *dst, int dst_chars)
+static void wide_from_utf8(const char *src, wchar_t *dst, int dst_chars)
 {
     if (!src || !src[0]) { dst[0] = L'\0'; return; }
-    MultiByteToWideChar(CP_ACP, 0, src, -1, dst, dst_chars);
+    MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, dst_chars);
 }
 
-static void wide_to_acp(const wchar_t *src, char *dst, int dst_chars)
+static void wide_to_utf8(const wchar_t *src, char *dst, int dst_chars)
 {
     if (!src || !src[0]) { dst[0] = '\0'; return; }
-    WideCharToMultiByte(CP_ACP, 0, src, -1, dst, dst_chars, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, src, -1, dst, dst_chars, NULL, NULL);
 }
 
 static void log_message(HWND hList, const wchar_t *fmt, ...)
@@ -156,7 +173,7 @@ static void create_sign_page(HWND parent)
     g_hPageSign = CreateWindowExW(0, L"STATIC", L"",
                                    WS_CHILD | WS_VISIBLE,
                                    PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, 460,
+                                   W_CLIENT - 2*PAD, 480,
                                    parent, NULL, g_hInst, NULL);
 
     int y = 12;
@@ -216,9 +233,9 @@ static void create_sign_page(HWND parent)
     y += EH + 2;
 
     /* Sign button */
-    make_ctrl(g_hPageSign, L"BUTTON", L"开始签名",
-              BS_DEFPUSHBUTTON, 0, y, W_BTN_SIGN, EH + 4, IDC_BTN_SIGN);
-    y += EH + 4 + GAP;
+    make_ctrl(g_hPageSign, L"BUTTON", L"  开始签名",
+              BS_OWNERDRAW, 0, y, W_BTN_SIGN, EH + 6, IDC_BTN_SIGN);
+    y += EH + 6 + GAP;
 
     /* Progress bar */
     g_hProgress = make_ctrl(g_hPageSign, PROGRESS_CLASSW, L"",
@@ -230,16 +247,19 @@ static void create_sign_page(HWND parent)
                         WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
                         0, y, W_CLIENT - 2*PAD, 200, IDC_LIST_LOG);
 
-    /* Set a slightly larger font for the log listbox (monospace feel) */
+    /* Log listbox font (monospace feel) */
     HFONT hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                                    DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                                    GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                                     FIXED_PITCH | FF_MODERN,
-                                    L"Consolas");
+                                    L"Microsoft YaHei UI");
     if (!hMonoFont)
         hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                                   0, L"Segoe UI");
     SendMessageW(g_hLog, WM_SETFONT, (WPARAM)hMonoFont, TRUE);
+
+    /* Set dark background for log listbox */
+    SendMessageW(g_hLog, LB_SETITEMHEIGHT, 0, 18);
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,7 +271,7 @@ static void create_cert_page(HWND parent)
     g_hPageCert = CreateWindowExW(0, L"STATIC", L"",
                                    WS_CHILD,
                                    PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, 460,
+                                   W_CLIENT - 2*PAD, 480,
                                    parent, NULL, g_hInst, NULL);
 
     int y = 12;
@@ -283,9 +303,9 @@ static void create_cert_page(HWND parent)
     y += EH + GAP;
 
     /* Generate button */
-    make_ctrl(g_hPageCert, L"BUTTON", L"生成证书",
-              BS_DEFPUSHBUTTON, 0, y, W_BTN_GEN, EH + 4, IDC_BTN_GENERATE);
-    y += EH + 4 + GAP;
+    make_ctrl(g_hPageCert, L"BUTTON", L"  生成证书",
+              BS_OWNERDRAW, 0, y, W_BTN_GEN, EH + 6, IDC_BTN_GENERATE);
+    y += EH + 6 + GAP;
 
     /* Status label */
     make_ctrl(g_hPageCert, L"STATIC", L"",
@@ -319,7 +339,7 @@ static void sign_progress_cb(const char *filename, int current, int total,
     SendMessageW(ctx->hProgress, PBM_SETPOS, (WPARAM)(current * 100 / total), 0);
 
     wchar_t wfilename[MAX_PATH];
-    wide_from_acp(filename, wfilename, MAX_PATH);
+    wide_from_utf8(filename, wfilename, MAX_PATH);
 
     if (success == 1)
         log_message(ctx->hLog, L"[OK] %s", wfilename);
@@ -363,8 +383,102 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         switch_tab(0);
 
         SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
+        SendMessageW(g_hProgress, PBM_SETBARCOLOR, 0, (LPARAM)g_clrAccent);
+        SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, (LPARAM)RGB(220, 225, 232));
 
         return 0;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC hdc = (HDC)wParam;
+        HWND hCtrl = (HWND)lParam;
+        /* Dark bg for log listbox (it sends CTLCOLORSTATIC too) */
+        if (hCtrl == g_hLog) {
+            SetTextColor(hdc, g_clrLogText);
+            SetBkColor(hdc, g_clrLogBg);
+            return (LRESULT)g_hbrLogBg;
+        }
+        /* Light background for all other static controls */
+        SetTextColor(hdc, g_clrText);
+        SetBkColor(hdc, g_clrBg);
+        return (LRESULT)g_hbrBg;
+    }
+
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hdc = (HDC)wParam;
+        SetBkColor(hdc, g_clrEditBg);
+        return (LRESULT)g_hbrEditBg;
+    }
+
+    case WM_CTLCOLORLISTBOX:
+    {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, g_clrLogText);
+        SetBkColor(hdc, g_clrLogBg);
+        return (LRESULT)g_hbrLogBg;
+    }
+
+    case WM_ERASEBKGND:
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wParam, &rc, g_hbrBg);
+        return 1;
+    }
+
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
+        if (mis->CtlType == ODT_BUTTON) {
+            mis->itemWidth  = mis->itemID == IDC_BTN_SIGN ? W_BTN_SIGN : W_BTN_GEN;
+            mis->itemHeight = EH + 6;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    case WM_DRAWITEM:
+    {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lParam;
+        if (dis->CtlType != ODT_BUTTON) return FALSE;
+
+        BOOL pressed = dis->itemState & ODS_SELECTED;
+        BOOL focused = dis->itemState & ODS_FOCUS;
+
+        /* Background: accent blue, darker when pressed */
+        COLORREF bg = pressed ? RGB(0, 90, 170) : g_clrAccent;
+        HBRUSH hbrBtn = CreateSolidBrush(bg);
+        FillRect(dis->hDC, &dis->rcItem, hbrBtn);
+        DeleteObject(hbrBtn);
+
+        /* Border */
+        HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0, 80, 160));
+        HPEN hOldPen = SelectObject(dis->hDC, hPen);
+        HBRUSH hOldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+        Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top,
+                  dis->rcItem.right, dis->rcItem.bottom);
+        SelectObject(dis->hDC, hOldPen);
+        SelectObject(dis->hDC, hOldBrush);
+        DeleteObject(hPen);
+
+        /* Focus rect */
+        if (focused) {
+            RECT rcFocus = dis->rcItem;
+            InflateRect(&rcFocus, -3, -3);
+            DrawFocusRect(dis->hDC, &rcFocus);
+        }
+
+        /* Text: white, centered */
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, RGB(255, 255, 255));
+        SelectObject(dis->hDC, g_hFont);
+        wchar_t btnText[64];
+        GetWindowTextW(dis->hwndItem, btnText, 64);
+        DrawTextW(dis->hDC, btnText, -1, &dis->rcItem,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return TRUE;
     }
 
     case WM_NOTIFY:
@@ -423,11 +537,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             char target[MAX_PATH], pfx[MAX_PATH], password[256];
             char ts_url[512], outdir[MAX_PATH];
-            wide_to_acp(wtarget, target, MAX_PATH);
-            wide_to_acp(wpfx, pfx, MAX_PATH);
-            wide_to_acp(wpassword, password, 256);
-            wide_to_acp(wts_url, ts_url, 512);
-            wide_to_acp(woutdir, outdir, MAX_PATH);
+            wide_to_utf8(wtarget, target, MAX_PATH);
+            wide_to_utf8(wpfx, pfx, MAX_PATH);
+            wide_to_utf8(wpassword, password, 256);
+            wide_to_utf8(wts_url, ts_url, 512);
+            wide_to_utf8(woutdir, outdir, MAX_PATH);
 
             const char *ts = (ts_url[0]) ? ts_url : NULL;
             const char *out = (outdir[0]) ? outdir : NULL;
@@ -486,7 +600,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (days <= 0) days = 90;
 
             char dir[MAX_PATH];
-            wide_to_acp(wdir, dir, MAX_PATH);
+            wide_to_utf8(wdir, dir, MAX_PATH);
             if (!directory_exists(dir)) create_directory(dir);
 
             HWND hBtn = GetDlgItem(hwnd, IDC_BTN_GENERATE);
@@ -558,22 +672,32 @@ int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Create font */
     g_hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                            0, L"Segoe UI");
+                            GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                            0, L"Microsoft YaHei UI");
+    if (!g_hFont)
+        g_hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                              DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                              0, L"Segoe UI");
+
+    /* Create brushes for custom colors */
+    g_hbrBg     = CreateSolidBrush(g_clrBg);
+    g_hbrLogBg  = CreateSolidBrush(g_clrLogBg);
+    g_hbrEditBg = CreateSolidBrush(g_clrEditBg);
+    g_hbrBtnFace = CreateSolidBrush(g_clrBg);
 
     /* Register window class */
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = WndProc;
     wc.hInstance = g_hInst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = g_hbrBg;
     wc.lpszClassName = L"FileSignerGUI";
     wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MAIN_ICON));
     RegisterClassW(&wc);
 
     /* Create window, centered on screen */
     int win_w = W_CLIENT + 2 * GetSystemMetrics(SM_CXSIZEFRAME);
-    int win_h = 540 + 2 * GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CYCAPTION);
+    int win_h = 560 + 2 * GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CYCAPTION);
     int scr_w = GetSystemMetrics(SM_CXSCREEN);
     int scr_h = GetSystemMetrics(SM_CYSCREEN);
     int win_x = (scr_w - win_w) / 2;
@@ -599,6 +723,10 @@ int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Cleanup */
     DeleteObject(g_hFont);
+    DeleteObject(g_hbrBg);
+    DeleteObject(g_hbrLogBg);
+    DeleteObject(g_hbrEditBg);
+    DeleteObject(g_hbrBtnFace);
     CoUninitialize();
     return (int)msg.wParam;
 }

@@ -2,15 +2,18 @@
 #define FILE_UTILS_H
 
 #include <stdlib.h>
+#include <stdio.h>
 
-// 文件列表结构体
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 typedef struct {
-    char** files;        // 文件路径数组
-    size_t count;        // 文件数量
-    size_t capacity;     // 数组容量
+    char** files;
+    size_t count;
+    size_t capacity;
 } FileList;
 
-// 文件操作函数
 int file_exists(const char* path);
 int directory_exists(const char* path);
 int create_directory(const char* path);
@@ -30,4 +33,14 @@ char* get_basename(const char* path);
 char* get_dirname(const char* path);
 char* path_join(const char* dir, const char* file);
 
-#endif // FILE_UTILS_H
+#ifdef _WIN32
+/* UTF-8 to wide string conversion. Caller frees returned buffer. */
+wchar_t* utf8_to_wide_public(const char* str);
+
+/* UTF-8 aware fopen for Windows (supports Chinese paths). */
+FILE* fopen_utf8(const char* path, const char* mode);
+#else
+#define fopen_utf8 fopen
+#endif
+
+#endif /* FILE_UTILS_H */

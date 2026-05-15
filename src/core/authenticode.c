@@ -1,5 +1,6 @@
 #include "authenticode.h"
 #include "pe_file.h"
+#include "file_utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -204,7 +205,7 @@ static int load_pfx(const char *path, const char *password,
     PKCS12 *p12;
     int ret;
 
-    fp = fopen(path, "rb");
+    fp = fopen_utf8(path, "rb");
     if (!fp) return 0;
 
     p12 = d2i_PKCS12_fp(fp, NULL);
@@ -711,7 +712,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
 
     /* Verify certificate chain (if CA provided) */
     if (ca_path) {
-        FILE *fp = fopen(ca_path, "rb");
+        FILE *fp = fopen_utf8(ca_path, "rb");
         X509 *ca_cert;
         if (!fp) {
             fprintf(stderr, "Cannot open CA certificate: %s\n", ca_path);

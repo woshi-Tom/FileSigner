@@ -1,4 +1,5 @@
 #include "cert_gen.h"
+#include "file_utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,7 +72,7 @@ static EVP_PKEY* generate_rsa_key(int bits)
 /* Write PEM private key to file */
 static int write_key_pem(const char *path, EVP_PKEY *key, const char *password)
 {
-    FILE *fp = fopen(path, "wb");
+    FILE *fp = fopen_utf8(path, "wb");
     if (!fp) return 0;
 
     int ret;
@@ -90,7 +91,7 @@ static int write_key_pem(const char *path, EVP_PKEY *key, const char *password)
 /* Write PEM certificate to file */
 static int write_cert_pem(const char *path, X509 *cert)
 {
-    FILE *fp = fopen(path, "wb");
+    FILE *fp = fopen_utf8(path, "wb");
     if (!fp) return 0;
 
     int ret = PEM_write_X509(fp, cert);
@@ -217,7 +218,7 @@ static int write_pfx(const char *path, EVP_PKEY *key, X509 *cert,
     if (extra) sk_X509_free(extra);
     if (!p12) return 0;
 
-    fp = fopen(path, "wb");
+    fp = fopen_utf8(path, "wb");
     if (!fp) { PKCS12_free(p12); return 0; }
 
     ret = i2d_PKCS12_fp(fp, p12);

@@ -4,6 +4,9 @@
 // Application icon
 IDI_MAIN_ICON ICON "app.ico"
 
+// Application manifest (UTF-8 code page + DPI awareness)
+1 RT_MANIFEST "filesigner.exe.manifest"
+
 // Version info
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     2,0,0,0

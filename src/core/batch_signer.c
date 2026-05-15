@@ -8,6 +8,18 @@
 #include <windows.h>
 #define PATH_SEP '\\'
 #define strdup _strdup
+
+/* Convert wide string (UTF-16) to UTF-8. Caller frees returned buffer. */
+static char *wide_to_utf8(const wchar_t *wstr)
+{
+    if (!wstr || !wstr[0]) return strdup("");
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return strdup("");
+    char *buf = (char *)malloc(len);
+    if (!buf) return NULL;
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, buf, len, NULL, NULL);
+    return buf;
+}
 #else
 #include <dirent.h>
 #include <sys/stat.h>
@@ -56,31 +68,43 @@ static int pe_list_add(PEList *list, const char *path)
 static void scan_directory(const char *dir_path, int recursive, PEList *list)
 {
 #ifdef _WIN32
-    char search_pattern[MAX_PATH_LEN];
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind;
+    /* Convert UTF-8 dir_path to wide for W API */
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, dir_path, -1, NULL, 0);
+    if (wlen <= 0) return;
+    wchar_t *wdir = (wchar_t *)malloc(wlen * sizeof(wchar_t));
+    if (!wdir) return;
+    MultiByteToWideChar(CP_UTF8, 0, dir_path, -1, wdir, wlen);
 
-    snprintf(search_pattern, sizeof(search_pattern), "%s\\*", dir_path);
-    hFind = FindFirstFileA(search_pattern, &fd);
+    wchar_t search_pattern[MAX_PATH_LEN];
+    _snwprintf(search_pattern, MAX_PATH_LEN, L"%s\\*", wdir);
+    free(wdir);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(search_pattern, &fd);
     if (hFind == INVALID_HANDLE_VALUE) return;
 
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
             continue;
 
+        /* Convert filename to UTF-8 */
+        char *fname_utf8 = wide_to_utf8(fd.cFileName);
+        if (!fname_utf8) continue;
+
         char fullpath[MAX_PATH_LEN];
-        snprintf(fullpath, sizeof(fullpath), "%s\\%s", dir_path, fd.cFileName);
+        snprintf(fullpath, sizeof(fullpath), "%s\\%s", dir_path, fname_utf8);
+        free(fname_utf8);
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (recursive)
                 scan_directory(fullpath, recursive, list);
         } else {
-            const char *ext = strrchr(fd.cFileName, '.');
-            if (ext && _stricmp(ext, ".exe") == 0) {
+            const wchar_t *ext = wcsrchr(fd.cFileName, L'.');
+            if (ext && _wcsicmp(ext, L".exe") == 0) {
                 pe_list_add(list, fullpath);
             }
         }
-    } while (FindNextFileA(hFind, &fd));
+    } while (FindNextFileW(hFind, &fd));
 
     FindClose(hFind);
 #else

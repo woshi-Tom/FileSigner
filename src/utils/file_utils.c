@@ -14,6 +14,67 @@
 #define strdup _strdup
 #define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
 #define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+
+/* Convert wide string (UTF-16) to UTF-8. Caller frees returned buffer. */
+static char *wide_to_utf8(const wchar_t *wstr)
+{
+    if (!wstr || !wstr[0]) return strdup("");
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return strdup("");
+    char *buf = (char *)malloc(len);
+    if (!buf) return NULL;
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, buf, len, NULL, NULL);
+    return buf;
+}
+
+/* Convert UTF-8 to wide string. Caller frees returned buffer. */
+static wchar_t *utf8_to_wide(const char *str)
+{
+    if (!str || !str[0]) return wcsdup(L"");
+    int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
+    if (len <= 0) return wcsdup(L"");
+    wchar_t *buf = (wchar_t *)malloc(len * sizeof(wchar_t));
+    if (!buf) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, str, -1, buf, len);
+    return buf;
+}
+
+/* UTF-8 aware stat for Windows */
+static int stat_utf8(const char *path, struct stat *st)
+{
+    wchar_t *wpath = utf8_to_wide(path);
+    if (!wpath) return -1;
+    int ret = _wstat(wpath, st);
+    free(wpath);
+    return ret;
+}
+
+/* UTF-8 aware fopen for Windows (public, supports Chinese paths) */
+FILE *fopen_utf8(const char *path, const char *mode)
+{
+    wchar_t *wpath = utf8_to_wide(path);
+    if (!wpath) return NULL;
+    wchar_t wmode[8];
+    MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 8);
+    FILE *f = _wfopen(wpath, wmode);
+    free(wpath);
+    return f;
+}
+
+/* UTF-8 aware mkdir for Windows */
+static int mkdir_utf8(const char *path)
+{
+    wchar_t *wpath = utf8_to_wide(path);
+    if (!wpath) return -1;
+    int ret = _wmkdir(wpath);
+    free(wpath);
+    return ret;
+}
+
+wchar_t *utf8_to_wide_public(const char *str)
+{
+    return utf8_to_wide(str);
+}
 #else
 #include <dirent.h>
 #define PATH_SEPARATOR "/"
@@ -23,12 +84,20 @@
 
 int file_exists(const char* path) {
     struct stat st;
+#ifdef _WIN32
+    return (stat_utf8(path, &st) == 0 && S_ISREG(st.st_mode));
+#else
     return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
+#endif
 }
 
 int directory_exists(const char* path) {
     struct stat st;
+#ifdef _WIN32
+    return (stat_utf8(path, &st) == 0 && S_ISDIR(st.st_mode));
+#else
     return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+#endif
 }
 
 int create_directory(const char* path) {
@@ -51,7 +120,11 @@ int create_directory(const char* path) {
         if (*p == '/' || *p == '\\') {
             *p = '\0';
             if (!directory_exists(tmp)) {
+#ifdef _WIN32
+                if (mkdir_utf8(tmp) != 0) {
+#else
                 if (mkdir(tmp, 0755) != 0) {
+#endif
                     return 0;
                 }
             }
@@ -59,19 +132,31 @@ int create_directory(const char* path) {
         }
     }
 
+#ifdef _WIN32
+    return mkdir_utf8(tmp) == 0;
+#else
     return mkdir(tmp, 0755) == 0;
+#endif
 }
 
 long get_file_size(const char* filename) {
     struct stat st;
+#ifdef _WIN32
+    if (stat_utf8(filename, &st) == 0) {
+#else
     if (stat(filename, &st) == 0) {
+#endif
         return st.st_size;
     }
     return -1;
 }
 
 unsigned char* read_file(const char* filename, size_t* size) {
+#ifdef _WIN32
+    FILE* file = fopen_utf8(filename, "rb");
+#else
     FILE* file = fopen(filename, "rb");
+#endif
     if (!file) {
         return NULL;
     }
@@ -108,7 +193,11 @@ unsigned char* read_file(const char* filename, size_t* size) {
 }
 
 int write_file(const char* filename, const unsigned char* data, size_t size) {
+#ifdef _WIN32
+    FILE* file = fopen_utf8(filename, "wb");
+#else
     FILE* file = fopen(filename, "wb");
+#endif
     if (!file) {
         return 0;
     }
@@ -143,31 +232,45 @@ FileList* get_files_in_directory(const char* directory,
     list->capacity = 0;
 
 #ifdef _WIN32
-    char search_pattern[MAX_PATH_LEN];
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind;
+    /* Convert UTF-8 directory to wide string for W API */
+    int wlen_dir = MultiByteToWideChar(CP_UTF8, 0, directory, -1, NULL, 0);
+    if (wlen_dir <= 0) { free(list); return NULL; }
+    wchar_t *wdir = (wchar_t *)malloc(wlen_dir * sizeof(wchar_t));
+    if (!wdir) { free(list); return NULL; }
+    MultiByteToWideChar(CP_UTF8, 0, directory, -1, wdir, wlen_dir);
 
-    snprintf(search_pattern, sizeof(search_pattern), "%s\\*", directory);
-    hFind = FindFirstFileA(search_pattern, &fd);
+    wchar_t search_pattern[MAX_PATH_LEN];
+    _snwprintf(search_pattern, MAX_PATH_LEN, L"%s\\*", wdir);
+    free(wdir);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(search_pattern, &fd);
     if (hFind == INVALID_HANDLE_VALUE) {
         free(list);
         return NULL;
     }
 
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
             continue;
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
             continue;
 
+        /* Convert filename to UTF-8 */
+        char *fname_utf8 = wide_to_utf8(fd.cFileName);
+        if (!fname_utf8) continue;
+
         if (extension_filter && strlen(extension_filter) > 0) {
-            if (!has_extension(fd.cFileName, extension_filter))
+            if (!has_extension(fname_utf8, extension_filter)) {
+                free(fname_utf8);
                 continue;
+            }
         }
 
         char path[MAX_PATH_LEN];
-        snprintf(path, sizeof(path), "%s\\%s", directory, fd.cFileName);
+        snprintf(path, sizeof(path), "%s\\%s", directory, fname_utf8);
+        free(fname_utf8);
 
         if (list->count >= list->capacity) {
             size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
@@ -188,7 +291,7 @@ FileList* get_files_in_directory(const char* directory,
             return NULL;
         }
         list->count++;
-    } while (FindNextFileA(hFind, &fd));
+    } while (FindNextFileW(hFind, &fd));
 
     FindClose(hFind);
 #else
