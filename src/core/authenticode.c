@@ -555,7 +555,7 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
         DerBuf ci;
         db_init(&ci);
         /* ContentInfo OID */
-        db_der_oid_nid(&ci, NID_pkcs7_signedData);
+        db_der_oid_str(&ci, "1.2.840.113549.1.7.2");
 
         /* [0] EXPLICIT — wrap SignedData in its own SEQUENCE first */
         {
@@ -757,13 +757,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         }
 
         int msg_digest_nid = OBJ_txt2nid("1.2.840.113549.1.9.4");
-        X509_ATTRIBUTE *md_attr = PKCS7_get_signed_attribute(si, msg_digest_nid);
-        if (!md_attr) {
-            fprintf(stderr, "No messageDigest attribute found\n");
-            goto cleanup;
-        }
-
-        ASN1_TYPE *md_val = X509_ATTRIBUTE_get0_type(md_attr, 0);
+        ASN1_TYPE *md_val = PKCS7_get_signed_attribute(si, msg_digest_nid);
         if (!md_val || md_val->type != V_ASN1_OCTET_STRING) {
             fprintf(stderr, "Invalid messageDigest attribute\n");
             goto cleanup;

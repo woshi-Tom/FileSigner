@@ -198,22 +198,24 @@ static int write_pfx(const char *path, EVP_PKEY *key, X509 *cert,
     PKCS12 *p12;
     FILE *fp;
     int ret;
+    STACK_OF(X509) *extra = NULL;
+
+    if (ca_cert) {
+        extra = sk_X509_new_null();
+        if (extra) sk_X509_push(extra, ca_cert);
+    }
 
     p12 = PKCS12_create(
         (char *)password,           /* export password */
         CERT_SIGNER_CN,             /* friendly name */
         key,                        /* private key */
         cert,                       /* signer certificate */
-        NULL,                       /* extra certs (CA goes here) */
+        extra,                      /* extra certs (CA chain) */
         0, 0, 0, 0, 0
     );
 
+    if (extra) sk_X509_free(extra);
     if (!p12) return 0;
-
-    /* Add CA cert to the chain */
-    if (ca_cert) {
-        PKCS12_add_cert(&p12, ca_cert);
-    }
 
     fp = fopen(path, "wb");
     if (!fp) { PKCS12_free(p12); return 0; }

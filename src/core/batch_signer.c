@@ -7,6 +7,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #define PATH_SEP '\\'
+#define strdup _strdup
 #else
 #include <dirent.h>
 #include <sys/stat.h>

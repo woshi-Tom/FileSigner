@@ -165,7 +165,6 @@ static unsigned char* http_post(const char *url,
     DWORD status_code = 0, size = sizeof(DWORD);
     DWORD bytes_available = 0, total_read = 0;
     unsigned char *result = NULL;
-    char *url_a;
 
     /* Convert URL to wide chars */
     int wlen = MultiByteToWideChar(CP_UTF8, 0, url, -1, NULL, 0);
@@ -280,7 +279,6 @@ static int parse_timestamp_response(const unsigned char *resp, size_t resp_len,
 
     const unsigned char *p = resp;
     const unsigned char *end = resp + resp_len;
-    int tag;
     size_t len;
     int hlen;
 
