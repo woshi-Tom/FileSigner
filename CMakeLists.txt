@@ -57,12 +57,19 @@ set(RESOURCE_FILES
 )
 
 # Single executable: double-click = GUI, command-line args = CLI
-add_executable(filesigner WIN32
+add_executable(filesigner
     ${MAIN_SOURCES}
     ${CORE_SOURCES}
     ${UTIL_SOURCES}
     ${RESOURCE_FILES}
 )
+
+if(MSVC)
+    # Set Windows subsystem (entry point WinMain auto-detected)
+    set_target_properties(filesigner PROPERTIES
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+    )
+endif()
 
 target_link_libraries(filesigner
     OpenSSL::Crypto

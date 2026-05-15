@@ -30,9 +30,9 @@ static char *wide_to_utf8(const wchar_t *wstr)
 /* Convert UTF-8 to wide string. Caller frees returned buffer. */
 static wchar_t *utf8_to_wide(const char *str)
 {
-    if (!str || !str[0]) return wcsdup(L"");
+    if (!str || !str[0]) return _wcsdup(L"");
     int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
-    if (len <= 0) return wcsdup(L"");
+    if (len <= 0) return _wcsdup(L"");
     wchar_t *buf = (wchar_t *)malloc(len * sizeof(wchar_t));
     if (!buf) return NULL;
     MultiByteToWideChar(CP_UTF8, 0, str, -1, buf, len);
@@ -40,7 +40,7 @@ static wchar_t *utf8_to_wide(const char *str)
 }
 
 /* UTF-8 aware stat for Windows */
-static int stat_utf8(const char *path, struct stat *st)
+static int stat_utf8(const char *path, struct _stat *st)
 {
     wchar_t *wpath = utf8_to_wide(path);
     if (!wpath) return -1;
@@ -83,19 +83,21 @@ wchar_t *utf8_to_wide_public(const char *str)
 #define MAX_PATH_LEN 4096
 
 int file_exists(const char* path) {
-    struct stat st;
 #ifdef _WIN32
+    struct _stat st;
     return (stat_utf8(path, &st) == 0 && S_ISREG(st.st_mode));
 #else
+    struct stat st;
     return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
 #endif
 }
 
 int directory_exists(const char* path) {
-    struct stat st;
 #ifdef _WIN32
+    struct _stat st;
     return (stat_utf8(path, &st) == 0 && S_ISDIR(st.st_mode));
 #else
+    struct stat st;
     return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
 #endif
 }
@@ -140,10 +142,11 @@ int create_directory(const char* path) {
 }
 
 long get_file_size(const char* filename) {
-    struct stat st;
 #ifdef _WIN32
+    struct _stat st;
     if (stat_utf8(filename, &st) == 0) {
 #else
+    struct stat st;
     if (stat(filename, &st) == 0) {
 #endif
         return st.st_size;

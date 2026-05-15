@@ -546,7 +546,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 wchar_t tabText[64] = {0};
                 tci.pszText = tabText;
                 tci.cchTextMax = 64;
-                TabCtrl_GetItemW(g_hTab, nmc->nmcd.dwItemSpec, &tci);
+                SendMessageW(g_hTab, TCM_GETITEMW, nmc->nmcd.dwItemSpec, (LPARAM)&tci);
 
                 SetBkMode(nmc->nmcd.hdc, TRANSPARENT);
                 SetTextColor(nmc->nmcd.hdc, isSel ? g_clrAccent : RGB(100, 100, 110));
