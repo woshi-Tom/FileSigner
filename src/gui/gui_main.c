@@ -52,8 +52,8 @@
 #define W_BROWSE        84      /* browse button width */
 #define W_BTN_SIGN      130     /* sign button width */
 #define W_BTN_GEN       160     /* generate button width */
-#define PAGE_TOP        38      /* top offset for page content */
-#define TAB_H           30      /* tab control height */
+#define PAGE_TOP        42      /* top offset for page content */
+#define TAB_H           32      /* tab control height */
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                             */
@@ -185,7 +185,7 @@ static void create_sign_page(HWND parent)
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_TARGET);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_TGT);
+              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_TGT);
     y += EH + GAP;
 
     /* PFX */
@@ -194,7 +194,7 @@ static void create_sign_page(HWND parent)
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_PFX);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_PFX);
+              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_PFX);
     y += EH + GAP;
 
     /* Password */
@@ -221,7 +221,7 @@ static void create_sign_page(HWND parent)
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_OUTDIR);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_OUT);
+              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_OUT);
     y += EH + GAP;
 
     /* Checkboxes */
@@ -290,7 +290,7 @@ static void create_cert_page(HWND parent)
               WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_CERT_DIR);
     make_ctrl(g_hPageCert, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_CD);
+              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_CD);
     y += EH + GAP;
 
     /* Validity days */
@@ -364,8 +364,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     {
         /* Tab control */
         g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
-                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                  0, 0, W_CLIENT, TAB_H,
+                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
+                                  | TCS_FLATBUTTONS,
+                                  0, 0, W_CLIENT, TAB_H + 4,
                                   hwnd, (HMENU)IDC_TAB, g_hInst, NULL);
         SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
@@ -418,6 +419,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetTextColor(hdc, g_clrLogText);
         SetBkColor(hdc, g_clrLogBg);
         return (LRESULT)g_hbrLogBg;
+    }
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+
+        /* Fill background */
+        FillRect(hdc, &rc, g_hbrBg);
+
+        /* Accent header bar */
+        RECT hdr = { 0, 0, rc.right, 3 };
+        HBRUSH hbrHdr = CreateSolidBrush(g_clrAccent);
+        FillRect(hdc, &hdr, hbrHdr);
+        DeleteObject(hbrHdr);
+
+        /* Thin line below tab area */
+        RECT line = { PAD, PAGE_TOP - 2, rc.right - PAD, PAGE_TOP - 1 };
+        HBRUSH hbrLine = CreateSolidBrush(RGB(210, 215, 222));
+        FillRect(hdc, &line, hbrLine);
+        DeleteObject(hbrLine);
+
+        EndPaint(hwnd, &ps);
+        return 0;
     }
 
     case WM_ERASEBKGND:
@@ -486,6 +513,48 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         NMHDR *nmh = (NMHDR *)lParam;
         if (nmh->idFrom == IDC_TAB && nmh->code == TCN_SELCHANGE) {
             switch_tab(TabCtrl_GetCurSel(g_hTab));
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        /* Custom draw tab control for modern look */
+        if (nmh->idFrom == IDC_TAB && nmh->code == NM_CUSTOMDRAW) {
+            NMTTCUSTOMDRAW *nmc = (NMTTCUSTOMDRAW *)lParam;
+            if (nmc->nmcd.dwDrawStage == CDDS_PREPAINT)
+                return CDRF_NOTIFYITEMDRAW;
+            if (nmc->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                int sel = TabCtrl_GetCurSel(g_hTab);
+                BOOL isSel = ((int)nmc->nmcd.dwItemSpec == sel);
+                RECT rc = nmc->nmcd.rc;
+
+                /* Fill background */
+                COLORREF bg = isSel ? g_clrBg : RGB(230, 234, 240);
+                HBRUSH hbr = CreateSolidBrush(bg);
+                FillRect(nmc->nmcd.hdc, &rc, hbr);
+                DeleteObject(hbr);
+
+                /* Draw accent bar on selected tab */
+                if (isSel) {
+                    RECT bar = { rc.left + 8, rc.bottom - 3, rc.right - 8, rc.bottom };
+                    HBRUSH hbrBar = CreateSolidBrush(g_clrAccent);
+                    FillRect(nmc->nmcd.hdc, &bar, hbrBar);
+                    DeleteObject(hbrBar);
+                }
+
+                /* Draw text */
+                TCITEMW tci;
+                memset(&tci, 0, sizeof(tci));
+                tci.mask = TCIF_TEXT;
+                wchar_t tabText[64] = {0};
+                tci.pszText = tabText;
+                tci.cchTextMax = 64;
+                TabCtrl_GetItemW(g_hTab, nmc->nmcd.dwItemSpec, &tci);
+
+                SetBkMode(nmc->nmcd.hdc, TRANSPARENT);
+                SetTextColor(nmc->nmcd.hdc, isSel ? g_clrAccent : RGB(100, 100, 110));
+                SelectObject(nmc->nmcd.hdc, g_hFont);
+                DrawTextW(nmc->nmcd.hdc, tabText, -1, &rc,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return CDRF_SKIPDEFAULT;
+            }
         }
         return 0;
     }
