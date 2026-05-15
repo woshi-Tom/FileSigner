@@ -66,9 +66,9 @@ add_executable(filesigner
 
 if(MSVC)
     # Set Windows subsystem (entry point WinMain auto-detected)
-    # Disable CMake auto-manifest to avoid conflict with our custom manifest in resource.rc
+    # Merge custom manifest (UTF-8 + DPI) with auto-generated CRT manifest
     set_target_properties(filesigner PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:WINDOWS /MANIFEST:NO"
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:${CMAKE_SOURCE_DIR}/res/filesigner.exe.manifest"
     )
 endif()
 
