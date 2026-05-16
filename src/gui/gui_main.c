@@ -23,7 +23,8 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                       UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
     (void)uIdSubclass; (void)dwRefData;
-    if (msg == WM_COMMAND) {
+    /* Forward messages that need custom handling to main window */
+    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORLISTBOX) {
         return SendMessageW(GetParent(hwnd), msg, wp, lp);
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
@@ -528,29 +529,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (id == IDC_BTN_BROWSE_TGT) {
             wchar_t path[MAX_PATH] = {0};
             if (browse_folder(hwnd, L"选择目标目录", path))
-                SetDlgItemTextW(hwnd, IDC_EDIT_TARGET, path);
+                SetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, path);
         }
         else if (id == IDC_BTN_BROWSE_PFX) {
             wchar_t path[MAX_PATH] = {0};
             if (browse_file(hwnd,
-                            L"PFX 文件\0*.pfx;*.p12\0所有文件\0*.*\0",
+                            L"PFX 文件\0*.pfx;*.p12\所有文件\0*.*\0",
                             L"选择 PFX 文件", path, MAX_PATH))
-                SetDlgItemTextW(hwnd, IDC_EDIT_PFX, path);
+                SetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, path);
         }
         else if (id == IDC_BTN_BROWSE_OUT) {
             wchar_t path[MAX_PATH] = {0};
             if (browse_folder(hwnd, L"选择输出目录", path))
-                SetDlgItemTextW(hwnd, IDC_EDIT_OUTDIR, path);
+                SetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, path);
         }
         else if (id == IDC_BTN_SIGN) {
             wchar_t wtarget[MAX_PATH], wpfx[MAX_PATH], wpassword[256];
             wchar_t wts_url[512], woutdir[MAX_PATH];
 
-            GetDlgItemTextW(hwnd, IDC_EDIT_TARGET, wtarget, MAX_PATH);
-            GetDlgItemTextW(hwnd, IDC_EDIT_PFX, wpfx, MAX_PATH);
-            GetDlgItemTextW(hwnd, IDC_EDIT_PASSWORD, wpassword, 256);
-            GetDlgItemTextW(hwnd, IDC_EDIT_TIMESTAMP, wts_url, 512);
-            GetDlgItemTextW(hwnd, IDC_EDIT_OUTDIR, woutdir, MAX_PATH);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, wtarget, MAX_PATH);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, wpfx, MAX_PATH);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PASSWORD, wpassword, 256);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_TIMESTAMP, wts_url, 512);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, woutdir, MAX_PATH);
 
             if (wcslen(wtarget) == 0) {
                 MessageBoxW(hwnd, L"请选择目标文件或目录。",
@@ -563,8 +564,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 break;
             }
 
-            int recursive = IsDlgButtonChecked(hwnd, IDC_CHK_RECURSIVE) == BST_CHECKED;
-            int force = IsDlgButtonChecked(hwnd, IDC_CHK_FORCE) == BST_CHECKED;
+            int recursive = IsDlgButtonChecked(g_hPageSign, IDC_CHK_RECURSIVE) == BST_CHECKED;
+            int force = IsDlgButtonChecked(g_hPageSign, IDC_CHK_FORCE) == BST_CHECKED;
 
             char target[MAX_PATH], pfx[MAX_PATH], password[256];
             char ts_url[512], outdir[MAX_PATH];
@@ -577,7 +578,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             const char *ts = (ts_url[0]) ? ts_url : NULL;
             const char *out = (outdir[0]) ? outdir : NULL;
 
-            HWND hBtn = GetDlgItem(hwnd, IDC_BTN_SIGN);
+            HWND hBtn = GetDlgItem(g_hPageSign, IDC_BTN_SIGN);
             EnableWindow(hBtn, FALSE);
             SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
             SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
@@ -614,12 +615,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         else if (id == IDC_BTN_BROWSE_CD) {
             wchar_t path[MAX_PATH] = {0};
             if (browse_folder(hwnd, L"选择输出目录", path))
-                SetDlgItemTextW(hwnd, IDC_EDIT_CERT_DIR, path);
+                SetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, path);
         }
         else if (id == IDC_BTN_GENERATE) {
             wchar_t wdir[MAX_PATH], wdays_str[16];
-            GetDlgItemTextW(hwnd, IDC_EDIT_CERT_DIR, wdir, MAX_PATH);
-            GetDlgItemTextW(hwnd, IDC_EDIT_CERT_DAYS, wdays_str, 16);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, wdir, MAX_PATH);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DAYS, wdays_str, 16);
 
             if (wcslen(wdir) == 0) {
                 MessageBoxW(hwnd, L"请选择输出目录。",
@@ -634,9 +635,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             wide_to_utf8(wdir, dir, MAX_PATH);
             if (!directory_exists(dir)) create_directory(dir);
 
-            HWND hBtn = GetDlgItem(hwnd, IDC_BTN_GENERATE);
+            HWND hBtn = GetDlgItem(g_hPageCert, IDC_BTN_GENERATE);
             EnableWindow(hBtn, FALSE);
-            SetDlgItemTextW(hwnd, IDC_LBL_CERT_STATUS, L"正在生成...");
+            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, L"正在生成...");
 
             if (cert_generate(dir, NULL, "FileSigner", days)) {
                 wchar_t msg[512];
@@ -646,10 +647,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                          L"请将 FileSigner_RootCA.cer 导入\n"
                          L"Windows 受信任的根证书颁发机构",
                          wdir);
-                SetDlgItemTextW(hwnd, IDC_LBL_CERT_STATUS, msg);
+                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, msg);
                 MessageBoxW(hwnd, msg, L"成功", MB_OK | MB_ICONINFORMATION);
             } else {
-                SetDlgItemTextW(hwnd, IDC_LBL_CERT_STATUS,
+                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
                                 L"生成失败! 请查看控制台输出。");
                 MessageBoxW(hwnd, L"证书生成失败。",
                             L"错误", MB_OK | MB_ICONERROR);
