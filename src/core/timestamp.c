@@ -139,8 +139,8 @@ static unsigned char* build_timestamp_request(const unsigned char *digest,
         ii += hlen + mi;
     }
 
-    /* Full TimeStampReq SEQUENCE */
-    total = (size_t)ii + 10; /* extra for overhead */
+    /* Full TimeStampReq SEQUENCE — tag(1) + max len encoding(4) + body */
+    total = (size_t)ii + 5;
     unsigned char *result = (unsigned char *)malloc(total);
     if (!result) return NULL;
 

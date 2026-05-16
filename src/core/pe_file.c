@@ -274,7 +274,8 @@ int pe_attach_signature(PE_FILE *pe, const unsigned char *sig_der, uint32_t sig_
             pe->size = new_file_size;
             /* Re-base pointers after realloc */
             pe->dos = (DOS_HEADER *)pe->data;
-            /* Re-parse is complex; just update the cert_write area */
+            uint32_t pe_off = pe->dos->e_lfanew;
+            pe->coff = (COFF_HEADER *)(pe->data + pe_off + 4);
         }
     } else {
         cert_write_offset = pe->size;
@@ -284,6 +285,8 @@ int pe_attach_signature(PE_FILE *pe, const unsigned char *sig_der, uint32_t sig_
         pe->data = new_data;
         pe->size = new_file_size;
         pe->dos = (DOS_HEADER *)pe->data;
+        uint32_t pe_off = pe->dos->e_lfanew;
+        pe->coff = (COFF_HEADER *)(pe->data + pe_off + 4);
     }
 
     /* Write WIN_CERTIFICATE header */

@@ -74,6 +74,7 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 
 static HINSTANCE g_hInst;
 static HFONT g_hFont;
+static HFONT g_hMonoFont;
 static HWND g_hTab;
 static HWND g_hPageSign, g_hPageCert;
 static HWND g_hProgress, g_hLog;
@@ -274,15 +275,15 @@ static void create_sign_page(HWND parent)
                         0, y, W_CLIENT - 2*PAD, 170, IDC_LIST_LOG);
 
     /* Log listbox font (monospace feel) */
-    HFONT hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+    g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                     GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                                     FIXED_PITCH | FF_MODERN,
                                     L"Microsoft YaHei UI");
-    if (!hMonoFont)
-        hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+    if (!g_hMonoFont)
+        g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                                   0, L"Segoe UI");
-    SendMessageW(g_hLog, WM_SETFONT, (WPARAM)hMonoFont, TRUE);
+    SendMessageW(g_hLog, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
 
     /* Set dark background for log listbox */
     SendMessageW(g_hLog, LB_SETITEMHEIGHT, 0, 18);
@@ -777,6 +778,7 @@ int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Cleanup */
     DeleteObject(g_hFont);
+    if (g_hMonoFont) DeleteObject(g_hMonoFont);
     DeleteObject(g_hbrBg);
     DeleteObject(g_hbrLogBg);
     DeleteObject(g_hbrEditBg);

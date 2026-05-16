@@ -66,9 +66,21 @@ static int db_len(DerBuf *db, size_t len)
     if (len < 0x80) return db_byte(db, (unsigned char)len);
     unsigned char tmp[5];
     int n;
-    if (len < 0x100)      { tmp[0] = 0x81; tmp[1] = (unsigned char)len; n = 2; }
-    else if (len < 0x10000) { tmp[0] = 0x82; tmp[1] = (unsigned char)(len >> 8); tmp[2] = (unsigned char)len; n = 3; }
-    else                    { tmp[0] = 0x83; tmp[1] = (unsigned char)(len >> 16); tmp[2] = (unsigned char)(len >> 8); tmp[3] = (unsigned char)len; n = 4; }
+    if (len < 0x100) {
+        tmp[0] = 0x81; tmp[1] = (unsigned char)len; n = 2;
+    } else if (len < 0x10000) {
+        tmp[0] = 0x82; tmp[1] = (unsigned char)(len >> 8);
+        tmp[2] = (unsigned char)len; n = 3;
+    } else if (len < 0x1000000) {
+        tmp[0] = 0x83; tmp[1] = (unsigned char)(len >> 16);
+        tmp[2] = (unsigned char)(len >> 8);
+        tmp[3] = (unsigned char)len; n = 4;
+    } else {
+        tmp[0] = 0x84; tmp[1] = (unsigned char)(len >> 24);
+        tmp[2] = (unsigned char)(len >> 16);
+        tmp[3] = (unsigned char)(len >> 8);
+        tmp[4] = (unsigned char)len; n = 5;
+    }
     return db_raw(db, tmp, n);
 }
 
