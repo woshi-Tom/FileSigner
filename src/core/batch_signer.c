@@ -178,9 +178,9 @@ int batch_sign(const char *dir_path,
         /* Check if already signed */
         int is_signed = authenticode_is_signed(filepath);
         if (is_signed == 1 && !force) {
-            printf("  [%d/%d] Skip (already signed): %s\n",
+            printf("  [%d/%d] Skip (already signed, use --force to re-sign): %s\n",
                    i + 1, list.count, filename);
-            if (cb) cb(filename, i + 1, list.count, 0, cb_data);
+            if (cb) cb(filename, i + 1, list.count, -2, cb_data);
             continue;
         }
 

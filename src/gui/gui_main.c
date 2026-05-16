@@ -379,8 +379,10 @@ static void sign_progress_cb(const char *filename, int current, int total,
 
     if (success == 1)
         log_message(ctx->hLog, L"[OK] %s", wfilename);
+    else if (success == -2)
+        log_message(ctx->hLog, L"[跳过] %s (已签名，请勾选\"强制重新签名\")", wfilename);
     else if (success == 0)
-        log_message(ctx->hLog, L"[SKIP] %s", wfilename);
+        log_message(ctx->hLog, L"[失败] %s", wfilename);
 
     MSG msg;
     while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {

@@ -196,10 +196,15 @@ unsigned char* read_file(const char* filename, size_t* size) {
 }
 
 int write_file(const char* filename, const unsigned char* data, size_t size) {
+    /* Safe write: write to temp file, then rename.
+     * Prevents data loss if write fails mid-way (disk full, etc). */
+    char tmp_path[MAX_PATH_LEN];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filename);
+
 #ifdef _WIN32
-    FILE* file = fopen_utf8(filename, "wb");
+    FILE* file = fopen_utf8(tmp_path, "wb");
 #else
-    FILE* file = fopen(filename, "wb");
+    FILE* file = fopen(tmp_path, "wb");
 #endif
     if (!file) {
         return 0;
@@ -208,7 +213,37 @@ int write_file(const char* filename, const unsigned char* data, size_t size) {
     size_t bytes_written = fwrite(data, 1, size, file);
     fclose(file);
 
-    return bytes_written == size;
+    if (bytes_written != size) {
+#ifdef _WIN32
+        wchar_t *wtmp = utf8_to_wide(tmp_path);
+        if (wtmp) { _wremove(wtmp); free(wtmp); }
+#else
+        remove(tmp_path);
+#endif
+        return 0;
+    }
+
+    /* Atomically replace original with temp file */
+#ifdef _WIN32
+    wchar_t *wtmp = utf8_to_wide(tmp_path);
+    wchar_t *wname = utf8_to_wide(filename);
+    int ret = 0;
+    if (wtmp && wname) {
+        /* Delete target first (MoveFileEx can't always replace) */
+        _wremove(wname);
+        ret = MoveFileW(wtmp, wname) ? 1 : 0;
+    }
+    if (!ret && wtmp) _wremove(wtmp);
+    free(wtmp);
+    free(wname);
+    return ret;
+#else
+    if (rename(tmp_path, filename) != 0) {
+        remove(tmp_path);
+        return 0;
+    }
+    return 1;
+#endif
 }
 
 const char* get_file_extension(const char* filename) {
