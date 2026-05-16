@@ -65,6 +65,7 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 #define W_EDIT          460     /* edit box width */
 #define W_BROWSE        84      /* browse button width */
 #define W_BTN_SIGN      130     /* sign button width */
+#define PAGE_H          620     /* page panel height */
 #define W_BTN_GEN       160     /* generate button width */
 #define PAGE_TOP        42      /* top offset for page content */
 #define TAB_H           32      /* tab control height */
@@ -188,7 +189,7 @@ static void create_sign_page(HWND parent)
     g_hPageSign = CreateWindowExW(0, L"STATIC", L"",
                                    WS_CHILD | WS_VISIBLE,
                                    PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, 500,
+                                   W_CLIENT - 2*PAD, PAGE_H,
                                    parent, NULL, g_hInst, NULL);
 
     int y = 8;
@@ -273,7 +274,7 @@ static void create_sign_page(HWND parent)
     /* Log listbox */
     g_hLog = make_ctrl(g_hPageSign, L"LISTBOX", L"",
                         WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                        0, y, W_CLIENT - 2*PAD, 170, IDC_LIST_LOG);
+                        0, y, W_CLIENT - 2*PAD, 195, IDC_LIST_LOG);
 
     /* Log listbox font (monospace feel) */
     g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
@@ -299,7 +300,7 @@ static void create_cert_page(HWND parent)
     g_hPageCert = CreateWindowExW(0, L"STATIC", L"",
                                    WS_CHILD,
                                    PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, 500,
+                                   W_CLIENT - 2*PAD, PAGE_H,
                                    parent, NULL, g_hInst, NULL);
 
     int y = 8;
@@ -792,7 +793,7 @@ int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Create window, centered on screen */
     int win_w = W_CLIENT + 2 * GetSystemMetrics(SM_CXSIZEFRAME);
-    int win_h = 560 + 2 * GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CYCAPTION);
+    int win_h = 680 + 2 * GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CYCAPTION);
     int scr_w = GetSystemMetrics(SM_CXSCREEN);
     int scr_h = GetSystemMetrics(SM_CYSCREEN);
     int win_x = (scr_w - win_w) / 2;
