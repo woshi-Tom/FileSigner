@@ -186,79 +186,92 @@ static void create_sign_page(HWND parent)
     g_hPageSign = CreateWindowExW(0, L"STATIC", L"",
                                    WS_CHILD | WS_VISIBLE,
                                    PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, 480,
+                                   W_CLIENT - 2*PAD, 500,
                                    parent, NULL, g_hInst, NULL);
 
-    int y = 12;
-    int edit_x = W_CLIENT - 2*PAD - W_BROWSE - 6; /* x where edit+button start */
+    int y = 8;
+    int edit_x = W_CLIENT - 2*PAD - W_BROWSE - 6;
+
+    /* Section header */
+    make_ctrl(g_hPageSign, L"STATIC", L"  签名设置",
+              SS_LEFT, 0, y, 300, LH + 2, 0);
+    y += LH + 6;
 
     /* Target */
-    make_ctrl(g_hPageSign, L"STATIC", L"目标 (文件或目录):", 0, 0, y, edit_x, LH, 0);
-    y += LH + 4;
+    make_ctrl(g_hPageSign, L"STATIC", L"目标 (文件或目录):", 0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_TARGET);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
               BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_TGT);
-    y += EH + GAP;
+    y += EH + 6;
 
     /* PFX */
-    make_ctrl(g_hPageSign, L"STATIC", L"PFX 证书文件:", 0, 0, y, edit_x, LH, 0);
-    y += LH + 4;
+    make_ctrl(g_hPageSign, L"STATIC", L"PFX 证书文件:", 0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_PFX);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
               BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_PFX);
-    y += EH + GAP;
+    y += EH + 6;
 
     /* Password */
-    make_ctrl(g_hPageSign, L"STATIC", L"PFX 密码:", 0, 0, y, edit_x, LH, 0);
-    y += LH + 4;
+    make_ctrl(g_hPageSign, L"STATIC", L"PFX 密码:", 0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
     make_ctrl(g_hPageSign, L"EDIT", L"",
               WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
               0, y, 280, EH, IDC_EDIT_PASSWORD);
-    y += EH + GAP;
+    y += EH + 6;
 
     /* Timestamp */
-    make_ctrl(g_hPageSign, L"STATIC", L"时间戳服务器 URL (可选):",
-              0, 0, y, edit_x, LH, 0);
-    y += LH + 4;
+    make_ctrl(g_hPageSign, L"STATIC", L"时间戳服务器 URL (可选):", 0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
     make_ctrl(g_hPageSign, L"EDIT", L"http://timestamp.digicert.com",
               WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT + W_BROWSE + 6, EH, IDC_EDIT_TIMESTAMP);
-    y += EH + GAP;
+    y += EH + 6;
 
     /* Output dir */
-    make_ctrl(g_hPageSign, L"STATIC", L"输出目录 (可选, 留空 = 覆盖原文件):",
-              0, 0, y, edit_x, LH, 0);
-    y += LH + 4;
+    make_ctrl(g_hPageSign, L"STATIC", L"输出目录 (可选, 留空 = 覆盖原文件):", 0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_OUTDIR);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
               BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_OUT);
-    y += EH + GAP;
+    y += EH + 8;
 
     /* Checkboxes */
     make_ctrl(g_hPageSign, L"BUTTON", L"包含子目录",
-              BS_AUTOCHECKBOX, 0, y, 200, LH, IDC_CHK_RECURSIVE);
-    y += LH + 2;
-    make_ctrl(g_hPageSign, L"BUTTON", L"强制重新签名已签名的文件",
-              BS_AUTOCHECKBOX, 0, y, 280, LH, IDC_CHK_FORCE);
-    y += EH + 2;
+              BS_AUTOCHECKBOX, 4, y, 200, LH, IDC_CHK_RECURSIVE);
+    make_ctrl(g_hPageSign, L"BUTTON", L"强制重新签名",
+              BS_AUTOCHECKBOX, 220, y, 180, LH, IDC_CHK_FORCE);
+    y += LH + 10;
+
+    /* Separator line */
+    HWND hSep = make_ctrl(g_hPageSign, L"STATIC", L"",
+                           SS_ETCHEDHORZ, 0, y, W_CLIENT - 2*PAD, 2, 0);
+    (void)hSep;
+    y += 8;
 
     /* Sign button */
     make_ctrl(g_hPageSign, L"BUTTON", L"开始签名",
               BS_DEFPUSHBUTTON, 0, y, W_BTN_SIGN, EH + 4, IDC_BTN_SIGN);
-    y += EH + 4 + GAP;
+    y += EH + 4 + 8;
 
     /* Progress bar */
     g_hProgress = make_ctrl(g_hPageSign, PROGRESS_CLASSW, L"",
                              0, 0, y, W_CLIENT - 2*PAD, 22, IDC_PROGRESS);
-    y += 22 + 6;
+    y += 22 + 8;
+
+    /* Log section title */
+    make_ctrl(g_hPageSign, L"STATIC", L"  日志输出",
+              SS_LEFT, 0, y, 300, LH + 2, 0);
+    y += LH + 3;
 
     /* Log listbox */
     g_hLog = make_ctrl(g_hPageSign, L"LISTBOX", L"",
                         WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                        0, y, W_CLIENT - 2*PAD, 200, IDC_LIST_LOG);
+                        0, y, W_CLIENT - 2*PAD, 170, IDC_LIST_LOG);
 
     /* Log listbox font (monospace feel) */
     HFONT hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
@@ -284,45 +297,54 @@ static void create_cert_page(HWND parent)
     g_hPageCert = CreateWindowExW(0, L"STATIC", L"",
                                    WS_CHILD,
                                    PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, 480,
+                                   W_CLIENT - 2*PAD, 500,
                                    parent, NULL, g_hInst, NULL);
 
-    int y = 12;
+    int y = 8;
+
+    /* Section header */
+    make_ctrl(g_hPageCert, L"STATIC", L"  证书生成",
+              SS_LEFT, 0, y, 300, LH + 2, 0);
+    y += LH + 8;
 
     /* Description */
     make_ctrl(g_hPageCert, L"STATIC",
-              L"生成 FileSigner 证书 (根 CA + 代码签名证书)。\n"
-              L"将根 CA 导入 Windows 受信任根存储即可信任签名后的文件。",
-              0, 0, y, W_CLIENT - 2*PAD, 42, 0);
-    y += 52;
+              L"生成自签名根 CA + 代码签名证书。\n"
+              L"将根 CA 导入 Windows 受信任根存储即可信任签名。",
+              SS_LEFT, 8, y, W_CLIENT - 2*PAD - 16, 36, 0);
+    y += 44;
 
     /* Output directory */
-    make_ctrl(g_hPageCert, L"STATIC", L"输出目录:", 0, 0, y, W_CLIENT - 2*PAD, LH, 0);
-    y += LH + 4;
+    make_ctrl(g_hPageCert, L"STATIC", L"输出目录:", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
     make_ctrl(g_hPageCert, L"EDIT", L"./certs",
               WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_CERT_DIR);
     make_ctrl(g_hPageCert, L"BUTTON", L"浏览...",
               BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_CD);
-    y += EH + GAP;
+    y += EH + 8;
 
     /* Validity days */
-    make_ctrl(g_hPageCert, L"STATIC", L"签名证书有效期 (天):",
-              0, 0, y, 180, LH, 0);
-    y += LH + 4;
+    make_ctrl(g_hPageCert, L"STATIC", L"签名证书有效期 (天):", 0, 8, y, 180, LH, 0);
+    y += LH + 3;
     make_ctrl(g_hPageCert, L"EDIT", L"90",
               WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
               0, y, 80, EH, IDC_EDIT_CERT_DAYS);
-    y += EH + GAP;
+    y += EH + 10;
+
+    /* Separator line */
+    make_ctrl(g_hPageCert, L"STATIC", L"",
+              SS_ETCHEDHORZ, 0, y, W_CLIENT - 2*PAD, 2, 0);
+    y += 8;
 
     /* Generate button */
     make_ctrl(g_hPageCert, L"BUTTON", L"生成证书",
               BS_DEFPUSHBUTTON, 0, y, W_BTN_GEN, EH + 4, IDC_BTN_GENERATE);
-    y += EH + 4 + GAP;
+    y += EH + 4 + 10;
 
     /* Status label */
     make_ctrl(g_hPageCert, L"STATIC", L"",
-              0, 0, y, W_CLIENT - 2*PAD, 140, IDC_LBL_CERT_STATUS);
+              SS_LEFT, 8, y, W_CLIENT - 2*PAD - 16, 140, IDC_LBL_CERT_STATUS);
 }
 
 /* ------------------------------------------------------------------ */
