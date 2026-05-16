@@ -138,7 +138,24 @@ void pe_free(PE_FILE *pe)
 
 int pe_is_signed(const PE_FILE *pe)
 {
-    return pe && pe->cert_offset != 0 && pe->cert_size >= sizeof(WIN_CERTIFICATE);
+    WIN_CERTIFICATE *wcert;
+
+    if (!pe || !pe->cert_offset || pe->cert_size < sizeof(WIN_CERTIFICATE))
+        return 0;
+
+    /* Bounds check */
+    if (pe->cert_offset + sizeof(WIN_CERTIFICATE) > pe->size)
+        return 0;
+
+    wcert = (WIN_CERTIFICATE *)(pe->data + pe->cert_offset);
+
+    /* Validate certificate type and length */
+    if (wcert->wCertificateType != WIN_CERT_TYPE_PKCS_SIGNED_DATA)
+        return 0;
+    if (wcert->dwLength < sizeof(WIN_CERTIFICATE) || wcert->dwLength > pe->cert_size)
+        return 0;
+
+    return 1;
 }
 
 /*
