@@ -46,6 +46,7 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 #define IDC_EDIT_OUTDIR     209
 #define IDC_BTN_BROWSE_OUT  210
 #define IDC_BTN_SIGN        211
+#define IDC_CHK_DEBUG       214
 #define IDC_PROGRESS        212
 #define IDC_LIST_LOG        213
 
@@ -80,6 +81,7 @@ static HFONT g_hMonoFont;
 static HWND g_hTab;
 static HWND g_hPageSign, g_hPageCert;
 static HWND g_hProgress, g_hLog;
+static int g_debug = 0;  /* 0=normal, 1=debug */
 
 /* Color scheme */
 static HBRUSH g_hbrBg;             /* main background */
@@ -116,6 +118,19 @@ static void wide_to_utf8(const wchar_t *src, char *dst, int dst_chars)
 
 static void log_message(HWND hList, const wchar_t *fmt, ...)
 {
+    wchar_t buf[2048];
+    va_list args;
+    va_start(args, fmt);
+    vswprintf(buf, sizeof(buf) / sizeof(wchar_t), fmt, args);
+    va_end(args);
+
+    int idx = (int)SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)buf);
+    SendMessageW(hList, LB_SETTOPINDEX, idx, 0);
+}
+
+static void log_debug(HWND hList, const wchar_t *fmt, ...)
+{
+    if (!g_debug) return;
     wchar_t buf[2048];
     va_list args;
     va_start(args, fmt);
@@ -248,6 +263,8 @@ static void create_sign_page(HWND parent)
               BS_AUTOCHECKBOX, 4, y, 200, LH, IDC_CHK_RECURSIVE);
     make_ctrl(g_hPageSign, L"BUTTON", L"强制重新签名",
               BS_AUTOCHECKBOX, 220, y, 180, LH, IDC_CHK_FORCE);
+    make_ctrl(g_hPageSign, L"BUTTON", L"调试日志",
+              BS_AUTOCHECKBOX, 410, y, 120, LH, IDC_CHK_DEBUG);
     y += LH + 10;
 
     /* Separator line */
@@ -392,7 +409,7 @@ static void sign_progress_cb(const char *filename, int current, int total,
     else if (success == -2)
         log_message(ctx->hLog, L"[跳过] %s (已签名，请勾选\"强制重新签名\")", wfilename);
     else if (success == -3)
-        log_message(ctx->hLog, L"%s", wfilename);
+        log_debug(ctx->hLog, L"%s", wfilename);
     else if (success == 0)
         log_message(ctx->hLog, L"[失败] %s", wfilename);
 
@@ -608,6 +625,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             int recursive = IsDlgButtonChecked(g_hPageSign, IDC_CHK_RECURSIVE) == BST_CHECKED;
             int force = IsDlgButtonChecked(g_hPageSign, IDC_CHK_FORCE) == BST_CHECKED;
+            g_debug = IsDlgButtonChecked(g_hPageSign, IDC_CHK_DEBUG) == BST_CHECKED;
 
             char target[MAX_PATH], pfx[MAX_PATH], password[256];
             char ts_url[512], outdir[MAX_PATH];
@@ -625,11 +643,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
             SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
             log_message(g_hLog, L"开始签名...");
-            log_message(g_hLog, L"目标: %s", wtarget);
-            log_message(g_hLog, L"PFX: %s", wpfx);
-            log_message(g_hLog, L"密码: %ls", wpassword[0] ? L"***" : L"(空)");
-            log_message(g_hLog, L"输出: %s", woutdir[0] ? woutdir : L"(覆盖原文件)");
-            log_message(g_hLog, L"强制: %s  递归: %s",
+            log_debug(g_hLog, L"目标: %s", wtarget);
+            log_debug(g_hLog, L"PFX: %s", wpfx);
+            log_debug(g_hLog, L"密码: %ls", wpassword[0] ? L"***" : L"(空)");
+            log_debug(g_hLog, L"输出: %s", woutdir[0] ? woutdir : L"(覆盖原文件)");
+            log_debug(g_hLog, L"强制: %s  递归: %s",
                         force ? L"是" : L"否", recursive ? L"是" : L"否");
 
             SignProgressCtx ctx = { g_hProgress, g_hLog, hBtn };
@@ -637,13 +655,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             __try {
                 if (directory_exists(target)) {
-                    log_message(g_hLog, L"[调试] 检测为目录");
+                    log_debug(g_hLog, L"[调试] 检测为目录");
                     if (out && !directory_exists(out)) create_directory(out);
                     count = batch_sign(target, pfx, password[0] ? password : NULL,
                                         ts, out, force, recursive,
                                         sign_progress_cb, &ctx);
                 } else if (file_exists(target)) {
-                    log_message(g_hLog, L"[调试] 检测为文件");
+                    log_debug(g_hLog, L"[调试] 检测为文件");
                     log_message(g_hLog, L"正在签名: %s", wtarget);
                     if (authenticode_sign(target, pfx, password[0] ? password : NULL,
                                            ts, out ? out : target)) {
