@@ -393,8 +393,13 @@ static void sign_progress_cb(const char *filename, int current, int total,
     else if (success == 0)
         log_message(ctx->hLog, L"[失败] %s", wfilename);
 
+    /* Keep UI responsive — process paint/input but handle WM_QUIT safely */
     MSG msg;
     while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) {
+            PostQuitMessage((int)msg.wParam);
+            return;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
