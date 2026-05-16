@@ -1,6 +1,9 @@
 #include <windows.h>
 #include <stdio.h>
 
+/* Required for OpenSSL DLL on Windows — provides OPENSSL_Applink */
+#include <openssl/applink.c>
+
 extern int cli_main(int argc, char *argv[]);
 extern int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     LPSTR lpCmdLine, int nCmdShow);
