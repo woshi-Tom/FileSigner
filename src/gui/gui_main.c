@@ -54,6 +54,7 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 #define IDC_EDIT_CERT_DAYS  303
 #define IDC_BTN_GENERATE    304
 #define IDC_LBL_CERT_STATUS 305
+#define IDC_EDIT_CERT_PW    306
 
 /* Layout constants */
 #define PAD             14      /* outer padding */
@@ -331,6 +332,14 @@ static void create_cert_page(HWND parent)
     make_ctrl(g_hPageCert, L"EDIT", L"90",
               WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
               0, y, 80, EH, IDC_EDIT_CERT_DAYS);
+    y += EH + 8;
+
+    /* PFX password */
+    make_ctrl(g_hPageCert, L"STATIC", L"PFX 密码 (签名时需填写此密码):", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
+    make_ctrl(g_hPageCert, L"EDIT", L"",
+              WS_BORDER | ES_AUTOHSCROLL,
+              0, y, 280, EH, IDC_EDIT_CERT_PW);
     y += EH + 10;
 
     /* Separator line */
@@ -569,6 +578,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, path);
         }
         else if (id == IDC_BTN_SIGN) {
+            /* Debug: confirm button handler is entered */
+            MessageBoxW(hwnd, L"按钮点击已触发", L"调试", MB_OK);
             wchar_t wtarget[MAX_PATH], wpfx[MAX_PATH], wpassword[256];
             wchar_t wts_url[512], woutdir[MAX_PATH];
 
@@ -643,9 +654,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, path);
         }
         else if (id == IDC_BTN_GENERATE) {
-            wchar_t wdir[MAX_PATH], wdays_str[16];
+            wchar_t wdir[MAX_PATH], wdays_str[16], wpw[256];
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, wdir, MAX_PATH);
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DAYS, wdays_str, 16);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_PW, wpw, 256);
 
             if (wcslen(wdir) == 0) {
                 MessageBoxW(hwnd, L"请选择输出目录。",
@@ -656,22 +668,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int days = _wtoi(wdays_str);
             if (days <= 0) days = 90;
 
-            char dir[MAX_PATH];
+            char dir[MAX_PATH], pw[256];
             wide_to_utf8(wdir, dir, MAX_PATH);
+            wide_to_utf8(wpw, pw, 256);
             if (!directory_exists(dir)) create_directory(dir);
 
             HWND hBtn = GetDlgItem(g_hPageCert, IDC_BTN_GENERATE);
             EnableWindow(hBtn, FALSE);
             SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, L"正在生成...");
 
-            if (cert_generate(dir, NULL, "FileSigner", days)) {
+            const char *pfx_pw = pw[0] ? pw : NULL;
+            if (cert_generate(dir, NULL, pfx_pw, days)) {
                 wchar_t msg[512];
-                wsprintfW(msg,
-                         L"证书生成成功!\n\n"
-                         L"生成文件位于: %s\n\n"
-                         L"请将 FileSigner_RootCA.cer 导入\n"
-                         L"Windows 受信任的根证书颁发机构",
-                         wdir);
+                if (wpw[0])
+                    wsprintfW(msg,
+                             L"证书生成成功!\n\n"
+                             L"生成文件位于: %s\n\n"
+                             L"PFX 密码已设置，签名时请使用相同密码。\n"
+                             L"请将 FileSigner_RootCA.cer 导入\n"
+                             L"Windows 受信任的根证书颁发机构",
+                             wdir);
+                else
+                    wsprintfW(msg,
+                             L"证书生成成功!\n\n"
+                             L"生成文件位于: %s\n\n"
+                             L"PFX 无密码，签名时密码留空即可。\n"
+                             L"请将 FileSigner_RootCA.cer 导入\n"
+                             L"Windows 受信任的根证书颁发机构",
+                             wdir);
                 SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, msg);
                 MessageBoxW(hwnd, msg, L"成功", MB_OK | MB_ICONINFORMATION);
             } else {
