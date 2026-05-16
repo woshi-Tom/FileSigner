@@ -17,6 +17,18 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
 
+/* Subclass procedure for page panels (STATIC) — forward WM_COMMAND to main window */
+#include <commctrl.h>
+static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                      UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+{
+    (void)uIdSubclass; (void)dwRefData;
+    if (msg == WM_COMMAND) {
+        return SendMessageW(GetParent(hwnd), msg, wp, lp);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 /* ------------------------------------------------------------------ */
 /* Control IDs                                                         */
 /* ------------------------------------------------------------------ */
@@ -381,6 +393,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         create_cert_page(hwnd);
         apply_font(g_hPageSign);
         apply_font(g_hPageCert);
+        /* Subclass page panels to forward WM_COMMAND to main window */
+        SetWindowSubclass(g_hPageSign, page_subclass, 0, 0);
+        SetWindowSubclass(g_hPageCert, page_subclass, 0, 0);
         switch_tab(0);
 
         SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
