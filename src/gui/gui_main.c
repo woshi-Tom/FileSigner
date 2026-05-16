@@ -391,6 +391,8 @@ static void sign_progress_cb(const char *filename, int current, int total,
         log_message(ctx->hLog, L"[OK] %s", wfilename);
     else if (success == -2)
         log_message(ctx->hLog, L"[跳过] %s (已签名，请勾选\"强制重新签名\")", wfilename);
+    else if (success == -3)
+        log_message(ctx->hLog, L"%s", wfilename);
     else if (success == 0)
         log_message(ctx->hLog, L"[失败] %s", wfilename);
 

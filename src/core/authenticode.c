@@ -641,11 +641,15 @@ int authenticode_sign(const char *pe_path,
 
     (void)timestamp_url; /* TODO: Phase 4 */
 
+    fprintf(stderr, "[sign] Loading PFX: %s\n", pfx_path);
+
     /* Load PFX */
     if (!load_pfx(pfx_path, pfx_password, &pkey, &cert, &ca_chain)) {
         fprintf(stderr, "Failed to load PFX: %s\n", pfx_path);
         return 0;
     }
+
+    fprintf(stderr, "[sign] Loading PE: %s\n", pe_path);
 
     /* Load PE file */
     pe = pe_load(pe_path);
@@ -654,11 +658,15 @@ int authenticode_sign(const char *pe_path,
         goto cleanup;
     }
 
+    fprintf(stderr, "[sign] Computing hash\n");
+
     /* Compute Authenticode hash (SHA256) */
     if (!pe_compute_hash(pe, EVP_sha256(), pe_hash, &pe_hash_len)) {
         fprintf(stderr, "Failed to compute PE hash\n");
         goto cleanup;
     }
+
+    fprintf(stderr, "[sign] Building PKCS#7\n");
 
     /* Build PKCS#7 SignedData as DER */
     pkcs7_der = build_authenticode_pkcs7(pkey, cert, ca_chain,
@@ -668,12 +676,16 @@ int authenticode_sign(const char *pe_path,
         goto cleanup;
     }
 
+    fprintf(stderr, "[sign] Attaching signature to PE\n");
+
     /* Attach to PE and save */
     out = output_path ? output_path : pe_path;
     if (!attach_pkcs7_to_pe(pe, pkcs7_der, pkcs7_len, out)) {
         fprintf(stderr, "Failed to save signed PE\n");
         goto cleanup;
     }
+
+    fprintf(stderr, "[sign] Done: %s -> %s\n", pe_path, out);
 
     printf("Signed: %s -> %s\n", pe_path, out);
     ret = 1;

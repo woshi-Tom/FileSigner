@@ -157,9 +157,11 @@ int batch_sign(const char *dir_path,
     pe_list_init(&list);
 
     /* Scan for PE files */
+    if (cb) cb("[扫描目录...]", 0, 0, -3, cb_data);
     scan_directory(dir_path, recursive, &list);
 
     if (list.count == 0) {
+        if (cb) cb("[未找到 .exe 文件]", 0, 0, -3, cb_data);
         printf("No .exe files found in: %s\n", dir_path);
         return 0;
     }
