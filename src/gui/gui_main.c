@@ -578,8 +578,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, path);
         }
         else if (id == IDC_BTN_SIGN) {
-            /* Debug: confirm button handler is entered */
-            MessageBoxW(hwnd, L"按钮点击已触发", L"调试", MB_OK);
             wchar_t wtarget[MAX_PATH], wpfx[MAX_PATH], wpassword[256];
             wchar_t wts_url[512], woutdir[MAX_PATH];
 
@@ -619,29 +617,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
             SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
             log_message(g_hLog, L"开始签名...");
+            log_message(g_hLog, L"目标: %s", wtarget);
+            log_message(g_hLog, L"PFX: %s", wpfx);
+            log_message(g_hLog, L"密码: %ls", wpassword[0] ? L"***" : L"(空)");
+            log_message(g_hLog, L"输出: %s", woutdir[0] ? woutdir : L"(覆盖原文件)");
+            log_message(g_hLog, L"强制: %s  递归: %s",
+                        force ? L"是" : L"否", recursive ? L"是" : L"否");
 
             SignProgressCtx ctx = { g_hProgress, g_hLog, hBtn };
-            int count;
+            int count = 0;
 
-            if (directory_exists(target)) {
-                if (out && !directory_exists(out)) create_directory(out);
-                count = batch_sign(target, pfx, password[0] ? password : NULL,
-                                    ts, out, force, recursive,
-                                    sign_progress_cb, &ctx);
-            } else if (file_exists(target)) {
-                log_message(g_hLog, L"正在签名: %s", wtarget);
-                if (authenticode_sign(target, pfx, password[0] ? password : NULL,
-                                       ts, out ? out : target)) {
-                    count = 1;
-                    log_message(g_hLog, L"[OK] 签名完成");
+            __try {
+                if (directory_exists(target)) {
+                    log_message(g_hLog, L"[调试] 检测为目录");
+                    if (out && !directory_exists(out)) create_directory(out);
+                    count = batch_sign(target, pfx, password[0] ? password : NULL,
+                                        ts, out, force, recursive,
+                                        sign_progress_cb, &ctx);
+                } else if (file_exists(target)) {
+                    log_message(g_hLog, L"[调试] 检测为文件");
+                    log_message(g_hLog, L"正在签名: %s", wtarget);
+                    if (authenticode_sign(target, pfx, password[0] ? password : NULL,
+                                           ts, out ? out : target)) {
+                        count = 1;
+                        log_message(g_hLog, L"[OK] 签名完成");
+                    } else {
+                        log_message(g_hLog, L"[FAIL] 签名失败");
+                    }
+                    SendMessageW(g_hProgress, PBM_SETPOS, 100, 0);
                 } else {
-                    count = 0;
-                    log_message(g_hLog, L"[FAIL] 签名失败");
+                    log_message(g_hLog, L"错误: 目标不存在: %s", wtarget);
                 }
-                SendMessageW(g_hProgress, PBM_SETPOS, 100, 0);
-            } else {
-                log_message(g_hLog, L"错误: 目标不存在: %s", wtarget);
-                count = 0;
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                log_message(g_hLog, L"[严重错误] 签名过程崩溃! 异常代码: 0x%08X",
+                            GetExceptionCode());
             }
 
             log_message(g_hLog, L"完成 - 已签名 %d 个文件", count);
