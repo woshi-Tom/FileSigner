@@ -233,9 +233,9 @@ static void create_sign_page(HWND parent)
     y += EH + 2;
 
     /* Sign button */
-    make_ctrl(g_hPageSign, L"BUTTON", L"  开始签名",
-              BS_OWNERDRAW, 0, y, W_BTN_SIGN, EH + 6, IDC_BTN_SIGN);
-    y += EH + 6 + GAP;
+    make_ctrl(g_hPageSign, L"BUTTON", L"开始签名",
+              BS_DEFPUSHBUTTON, 0, y, W_BTN_SIGN, EH + 4, IDC_BTN_SIGN);
+    y += EH + 4 + GAP;
 
     /* Progress bar */
     g_hProgress = make_ctrl(g_hPageSign, PROGRESS_CLASSW, L"",
@@ -303,9 +303,9 @@ static void create_cert_page(HWND parent)
     y += EH + GAP;
 
     /* Generate button */
-    make_ctrl(g_hPageCert, L"BUTTON", L"  生成证书",
-              BS_OWNERDRAW, 0, y, W_BTN_GEN, EH + 6, IDC_BTN_GENERATE);
-    y += EH + 6 + GAP;
+    make_ctrl(g_hPageCert, L"BUTTON", L"生成证书",
+              BS_DEFPUSHBUTTON, 0, y, W_BTN_GEN, EH + 4, IDC_BTN_GENERATE);
+    y += EH + 4 + GAP;
 
     /* Status label */
     make_ctrl(g_hPageCert, L"STATIC", L"",
@@ -453,59 +453,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         GetClientRect(hwnd, &rc);
         FillRect((HDC)wParam, &rc, g_hbrBg);
         return 1;
-    }
-
-    case WM_MEASUREITEM:
-    {
-        MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
-        if (mis->CtlType == ODT_BUTTON) {
-            mis->itemWidth  = mis->itemID == IDC_BTN_SIGN ? W_BTN_SIGN : W_BTN_GEN;
-            mis->itemHeight = EH + 6;
-            return TRUE;
-        }
-        return FALSE;
-    }
-
-    case WM_DRAWITEM:
-    {
-        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lParam;
-        if (dis->CtlType != ODT_BUTTON) return FALSE;
-
-        BOOL pressed = dis->itemState & ODS_SELECTED;
-        BOOL focused = dis->itemState & ODS_FOCUS;
-
-        /* Background: accent blue, darker when pressed */
-        COLORREF bg = pressed ? RGB(0, 90, 170) : g_clrAccent;
-        HBRUSH hbrBtn = CreateSolidBrush(bg);
-        FillRect(dis->hDC, &dis->rcItem, hbrBtn);
-        DeleteObject(hbrBtn);
-
-        /* Border */
-        HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0, 80, 160));
-        HPEN hOldPen = SelectObject(dis->hDC, hPen);
-        HBRUSH hOldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-        Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top,
-                  dis->rcItem.right, dis->rcItem.bottom);
-        SelectObject(dis->hDC, hOldPen);
-        SelectObject(dis->hDC, hOldBrush);
-        DeleteObject(hPen);
-
-        /* Focus rect */
-        if (focused) {
-            RECT rcFocus = dis->rcItem;
-            InflateRect(&rcFocus, -3, -3);
-            DrawFocusRect(dis->hDC, &rcFocus);
-        }
-
-        /* Text: white, centered */
-        SetBkMode(dis->hDC, TRANSPARENT);
-        SetTextColor(dis->hDC, RGB(255, 255, 255));
-        SelectObject(dis->hDC, g_hFont);
-        wchar_t btnText[64];
-        GetWindowTextW(dis->hwndItem, btnText, 64);
-        DrawTextW(dis->hDC, btnText, -1, &dis->rcItem,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        return TRUE;
     }
 
     case WM_NOTIFY:
