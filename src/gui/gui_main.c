@@ -399,7 +399,8 @@ static void sign_progress_cb(const char *filename, int current, int total,
                               int success, void *user_data)
 {
     SignProgressCtx *ctx = (SignProgressCtx *)user_data;
-    SendMessageW(ctx->hProgress, PBM_SETPOS, (WPARAM)(current * 100 / total), 0);
+    if (total > 0)
+        SendMessageW(ctx->hProgress, PBM_SETPOS, (WPARAM)(current * 100 / total), 0);
 
     wchar_t wfilename[MAX_PATH];
     wide_from_utf8(filename, wfilename, MAX_PATH);
