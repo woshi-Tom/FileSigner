@@ -415,14 +415,18 @@ static void sign_progress_cb(const char *filename, int current, int total,
         log_message(ctx->hLog, L"[失败] %s", wfilename);
 
     /* Keep UI responsive — process paint/input but handle WM_QUIT safely */
-    MSG msg;
-    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) {
-            PostQuitMessage((int)msg.wParam);
-            return;
+    __try {
+        MSG msg;
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                return;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        log_message(ctx->hLog, L"[警告] UI 消息处理异常: 0x%08X", GetExceptionCode());
     }
 }
 
