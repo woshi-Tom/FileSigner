@@ -764,12 +764,46 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 /* GUI entry point                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Global unhandled exception filter — writes crash info to file
+ * as fallback when __try/__except can't catch (e.g. stack overflow) */
+static LONG WINAPI crash_dump_filter(EXCEPTION_POINTERS *ep)
+{
+    wchar_t logpath[MAX_PATH];
+    DWORD len = GetTempPathW(MAX_PATH, logpath);
+    if (len > 0 && len < MAX_PATH - 30) {
+        wcscat(logpath, L"filesigner_crash.log");
+        HANDLE f = CreateFileW(logpath, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f != INVALID_HANDLE_VALUE) {
+            char buf[512];
+            DWORD written;
+            int n = _snprintf(buf, sizeof(buf),
+                "FileSigner crash log\r\n"
+                "Exception code: 0x%08X\r\n"
+                "Exception address: 0x%p\r\n"
+                "\r\nPossible causes:\r\n"
+                "  0xC0000094 = Integer divide by zero\r\n"
+                "  0xC0000005 = Access violation\r\n"
+                "  0xC00000FD = Stack overflow\r\n",
+                ep->ExceptionRecord->ExceptionCode,
+                (void*)ep->ExceptionRecord->ExceptionAddress);
+            if (n > 0)
+                WriteFile(f, buf, (DWORD)n, &written, NULL);
+            CloseHandle(f);
+        }
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
              LPSTR lpCmdLine, int nCmdShow)
 {
     WNDCLASSW wc;
     HWND hwnd;
     MSG msg;
+
+    /* Install global crash handler */
+    SetUnhandledExceptionFilter(crash_dump_filter);
 
     /* DPI awareness */
     HMODULE hUser = GetModuleHandleW(L"user32.dll");
