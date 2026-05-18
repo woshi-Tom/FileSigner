@@ -658,6 +658,21 @@ int authenticode_sign(const char *pe_path,
         goto cleanup;
     }
 
+    /* If re-signing: strip old signature before hashing.
+     * Clear old cert data and cert_dir so hash is computed on a clean file. */
+    if (pe->cert_offset && pe->cert_size) {
+        fprintf(stderr, "[sign] Re-signing: stripping old signature (offset=%u size=%u)\n",
+                pe->cert_offset, pe->cert_size);
+        memset(pe->data + pe->cert_offset, 0, pe->cert_size);
+        pe->size = pe->cert_offset;  /* Trim file to exclude old cert */
+        if (pe->cert_dir) {
+            pe->cert_dir->VirtualAddress = 0;
+            pe->cert_dir->Size = 0;
+        }
+        pe->cert_offset = 0;
+        pe->cert_size = 0;
+    }
+
     fprintf(stderr, "[sign] Computing hash\n");
 
     /* Compute Authenticode hash (SHA256) */

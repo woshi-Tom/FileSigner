@@ -66,7 +66,7 @@ add_executable(filesigner
 
 if(MSVC)
     set_target_properties(filesigner PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS /STACK:8388608"
     )
 endif()
 

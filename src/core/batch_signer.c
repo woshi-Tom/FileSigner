@@ -70,9 +70,9 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
 #ifdef _WIN32
     /* Convert UTF-8 dir_path to wide for W API */
     int wlen = MultiByteToWideChar(CP_UTF8, 0, dir_path, -1, NULL, 0);
-    if (wlen <= 0) return;
+    if (wlen <= 0) { fprintf(stderr, "[scan] MultiByteToWideChar failed: %s\n", dir_path); return; }
     wchar_t *wdir = (wchar_t *)malloc(wlen * sizeof(wchar_t));
-    if (!wdir) return;
+    if (!wdir) { fprintf(stderr, "[scan] malloc failed\n"); return; }
     MultiByteToWideChar(CP_UTF8, 0, dir_path, -1, wdir, wlen);
 
     wchar_t search_pattern[MAX_PATH_LEN];
@@ -81,7 +81,11 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
 
     WIN32_FIND_DATAW fd;
     HANDLE hFind = FindFirstFileW(search_pattern, &fd);
-    if (hFind == INVALID_HANDLE_VALUE) return;
+    if (hFind == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "[scan] FindFirstFileW failed: %s (err=%lu)\n", dir_path, GetLastError());
+        return;
+    }
+    fprintf(stderr, "[scan] scanning: %s\n", dir_path);
 
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
@@ -158,7 +162,9 @@ int batch_sign(const char *dir_path,
 
     /* Scan for PE files */
     if (cb) cb("[扫描目录...]", 0, 0, -3, cb_data);
+    fprintf(stderr, "[batch_sign] scanning: %s recursive=%d\n", dir_path, recursive);
     scan_directory(dir_path, recursive, &list);
+    fprintf(stderr, "[batch_sign] scan done, count=%d\n", list.count);
 
     if (list.count == 0) {
         if (cb) cb("[未找到 .exe 文件]", 0, 0, -3, cb_data);
@@ -166,6 +172,11 @@ int batch_sign(const char *dir_path,
         return 0;
     }
 
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "[找到 %d 个 .exe 文件]", list.count);
+        if (cb) cb(msg, 0, list.count, -3, cb_data);
+    }
     printf("Found %d .exe file(s)\n", list.count);
 
     /* Process each file */
@@ -174,11 +185,15 @@ int batch_sign(const char *dir_path,
         const char *filename = strrchr(filepath, PATH_SEP);
         filename = filename ? filename + 1 : filepath;
 
+        fprintf(stderr, "[batch_sign] [%d/%d] %s\n", i+1, list.count, filepath);
+
         /* Notify progress */
         if (cb) cb(filename, i + 1, list.count, -1, cb_data);
 
         /* Check if already signed */
+        fprintf(stderr, "[batch_sign] checking is_signed...\n");
         int is_signed = authenticode_is_signed(filepath);
+        fprintf(stderr, "[batch_sign] is_signed=%d force=%d\n", is_signed, force);
         if (is_signed == 1 && !force) {
             printf("  [%d/%d] Skip (already signed, use --force to re-sign): %s\n",
                    i + 1, list.count, filename);
@@ -196,6 +211,7 @@ int batch_sign(const char *dir_path,
         }
 
         /* Sign */
+        fprintf(stderr, "[batch_sign] calling authenticode_sign...\n");
         printf("  [%d/%d] Signing: %s\n", i + 1, list.count, filename);
 
         if (authenticode_sign(filepath, pfx_path, pfx_password, timestamp_url, out)) {
@@ -205,6 +221,7 @@ int batch_sign(const char *dir_path,
             fprintf(stderr, "  [%d/%d] Failed: %s\n", i + 1, list.count, filename);
             if (cb) cb(filename, i + 1, list.count, 0, cb_data);
         }
+        fprintf(stderr, "[batch_sign] file done\n");
     }
 
     pe_list_free(&list);

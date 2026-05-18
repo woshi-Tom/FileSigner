@@ -106,7 +106,8 @@ static COLORREF g_clrLogSkip       = RGB(180, 180, 190);  /* gray for [SKIP] */
 
 static void wide_from_utf8(const char *src, wchar_t *dst, int dst_chars)
 {
-    if (!src || !src[0]) { dst[0] = L'\0'; return; }
+    if (!src || !dst || dst_chars <= 0) { if (dst && dst_chars > 0) dst[0] = L'\0'; return; }
+    if (!src[0]) { dst[0] = L'\0'; return; }
     MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, dst_chars);
 }
 
