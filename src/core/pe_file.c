@@ -276,6 +276,8 @@ int pe_attach_signature(PE_FILE *pe, const unsigned char *sig_der, uint32_t sig_
             pe->dos = (DOS_HEADER *)pe->data;
             uint32_t pe_off = pe->dos->e_lfanew;
             pe->coff = (COFF_HEADER *)(pe->data + pe_off + 4);
+            pe->sections = (SECTION_HEADER *)(pe->data + pe_off + 4
+                             + sizeof(COFF_HEADER) + pe->coff->SizeOfOptionalHeader);
         }
     } else {
         cert_write_offset = pe->size;
@@ -287,6 +289,8 @@ int pe_attach_signature(PE_FILE *pe, const unsigned char *sig_der, uint32_t sig_
         pe->dos = (DOS_HEADER *)pe->data;
         uint32_t pe_off = pe->dos->e_lfanew;
         pe->coff = (COFF_HEADER *)(pe->data + pe_off + 4);
+        pe->sections = (SECTION_HEADER *)(pe->data + pe_off + 4
+                         + sizeof(COFF_HEADER) + pe->coff->SizeOfOptionalHeader);
     }
 
     /* Write WIN_CERTIFICATE header */

@@ -245,17 +245,17 @@ static int build_auth_attrs_der(const unsigned char *pe_hash,
 
     /* Attribute 1: contentType = SPC_PE_IMAGE_DATA (OID 1.3.6.1.4.1.311.2.1.15) */
     {
-        DerBuf val;
-        db_init(&val);
+        DerBuf val, attr;
+        if (!db_init(&val) || !db_init(&attr)) {
+            db_free(&val); db_free(&attr);
+            goto cleanup_attrs;
+        }
         db_der_oid_str(&val, SPC_PE_IMAGE_DATA_OID);
-
-        DerBuf attr;
-        db_init(&attr);
         /* attr = SEQUENCE { OID(NID_pkcs9_contentType), SET { value } } */
         db_der_oid_nid(&attr, NID_pkcs9_contentType);
         {
             DerBuf set_body;
-            db_init(&set_body);
+            if (!db_init(&set_body)) { goto cleanup_attrs; }
             db_raw(&set_body, val.data, val.len);
             db_der_set(&attr, set_body.data, set_body.len);
             db_free(&set_body);
@@ -267,16 +267,16 @@ static int build_auth_attrs_der(const unsigned char *pe_hash,
 
     /* Attribute 2: messageDigest = SHA256(PE hash) */
     {
-        DerBuf val;
-        db_init(&val);
+        DerBuf val, attr;
+        if (!db_init(&val) || !db_init(&attr)) {
+            db_free(&val); db_free(&attr);
+            goto cleanup_attrs;
+        }
         db_der_octet_string(&val, pe_hash, pe_hash_len);
-
-        DerBuf attr;
-        db_init(&attr);
         db_der_oid_nid(&attr, NID_pkcs9_messageDigest);
         {
             DerBuf set_body;
-            db_init(&set_body);
+            if (!db_init(&set_body)) { goto cleanup_attrs; }
             db_raw(&set_body, val.data, val.len);
             db_der_set(&attr, set_body.data, set_body.len);
             db_free(&set_body);
@@ -288,17 +288,17 @@ static int build_auth_attrs_der(const unsigned char *pe_hash,
 
     /* Attribute 3: SPC_STATEMENT_TYPE = individualCodeSigning */
     {
-        DerBuf val;
-        db_init(&val);
+        DerBuf val, attr;
+        if (!db_init(&val) || !db_init(&attr)) {
+            db_free(&val); db_free(&attr);
+            goto cleanup_attrs;
+        }
         db_der_oid_str(&val, SPC_INDIVIDUAL_PURPOSE);
-
-        DerBuf attr;
-        db_init(&attr);
         /* Use SPC_STATEMENT_TYPE OID as the attribute type */
         db_der_oid_str(&attr, SPC_STATEMENT_TYPE_OID);
         {
             DerBuf set_body;
-            db_init(&set_body);
+            if (!db_init(&set_body)) { goto cleanup_attrs; }
             db_raw(&set_body, val.data, val.len);
             db_der_set(&attr, set_body.data, set_body.len);
             db_free(&set_body);
@@ -335,9 +335,15 @@ static int build_auth_attrs_der(const unsigned char *pe_hash,
     }
 
     /* Wrap as SET OF */
-    db_der_set(out, body.data, body.len);
+    {
+        int ok = db_der_set(out, body.data, body.len);
+        db_free(&body);
+        return ok;
+    }
+
+cleanup_attrs:
     db_free(&body);
-    return 1;
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -387,6 +393,7 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
     size_t sig_len = 0;
     unsigned char *cert_der = NULL;
     int cert_der_len = 0;
+    unsigned char *result = NULL;
 
     if (!db_init(&signed_data)) return NULL;
 
@@ -395,31 +402,25 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
 
     /* 2. digestAlgorithms = SET { SEQUENCE { SHA256, NULL } } */
     {
-        DerBuf alg;
-        db_init(&alg);
+        DerBuf alg, alg_seq, alg_set;
+        if (!db_init(&alg) || !db_init(&alg_seq) || !db_init(&alg_set))
+            goto cleanup;
         db_der_oid_nid(&alg, NID_sha256);
         db_der_null(&alg);
-        {
-            DerBuf alg_seq;
-            db_init(&alg_seq);
-            db_der_seq(&alg_seq, alg.data, alg.len);
-            DerBuf alg_set;
-            db_init(&alg_set);
-            db_der_set(&alg_set, alg_seq.data, alg_seq.len);
-            db_raw(&signed_data, alg_set.data, alg_set.len);
-            db_free(&alg_set);
-            db_free(&alg_seq);
-        }
+        db_der_seq(&alg_seq, alg.data, alg.len);
+        db_der_set(&alg_set, alg_seq.data, alg_seq.len);
+        db_raw(&signed_data, alg_set.data, alg_set.len);
+        db_free(&alg_set);
+        db_free(&alg_seq);
         db_free(&alg);
     }
 
     /* 3. contentInfo = SEQUENCE { OID(SPC_PE_IMAGE_DATA) } */
     {
-        DerBuf ci;
-        db_init(&ci);
+        DerBuf ci, ci_seq;
+        if (!db_init(&ci) || !db_init(&ci_seq))
+            goto cleanup;
         db_der_oid_str(&ci, SPC_PE_IMAGE_DATA_OID);
-        DerBuf ci_seq;
-        db_init(&ci_seq);
         db_der_seq(&ci_seq, ci.data, ci.len);
         db_raw(&signed_data, ci_seq.data, ci_seq.len);
         db_free(&ci_seq);
@@ -429,12 +430,13 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
     /* 4. certificates [0] IMPLICIT SET OF { cert, [ca certs] } */
     {
         DerBuf certs;
-        db_init(&certs);
+        if (!db_init(&certs))
+            goto cleanup;
 
         /* Add signing cert */
         cert_der_len = i2d_X509(cert, &cert_der);
         if (cert_der_len <= 0 || !cert_der) {
-            db_free(&signed_data); return NULL;
+            goto cleanup;
         }
         db_raw(&certs, cert_der, (size_t)cert_der_len);
 
@@ -461,9 +463,8 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
         DerBuf auth_attrs;
         if (!build_auth_attrs_der(pe_hash, pe_hash_len,
                                    cert_der, cert_der_len, &auth_attrs)) {
-            OPENSSL_free(cert_der); db_free(&signed_data); return NULL;
+            goto cleanup;
         }
-        OPENSSL_free(cert_der); cert_der = NULL;
 
         der_attrs = auth_attrs.data;
         /* Don't free auth_attrs — we own der_attrs now */
@@ -471,13 +472,14 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
 
         /* Sign the DER-encoded attrs */
         if (!sign_attrs(der_attrs, auth_attrs.len, pkey, &sig, &sig_len)) {
-            OPENSSL_free(der_attrs); db_free(&signed_data); return NULL;
+            goto cleanup;
         }
 
         /* signerInfos */
         {
             DerBuf si;
-            db_init(&si);
+            if (!db_init(&si))
+                goto cleanup;
 
             /* version = 1 */
             db_der_int(&si, 1);
@@ -488,7 +490,7 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
                 ASN1_INTEGER *serial = X509_get_serialNumber(cert);
 
                 DerBuf isn;
-                db_init(&isn);
+                if (!db_init(&isn)) { db_free(&si); goto cleanup; }
                 /* issuer */
                 {
                     unsigned char *name_der = NULL;
@@ -501,7 +503,7 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
                 /* serial */
                 {
                     DerBuf ser;
-                    db_init(&ser);
+                    if (!db_init(&ser)) { db_free(&isn); db_free(&si); goto cleanup; }
                     db_der_int(&ser, ASN1_INTEGER_get(serial));
                     db_raw(&isn, ser.data, ser.len);
                     db_free(&ser);
@@ -512,12 +514,13 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
 
             /* digestAlgorithm = SHA256 */
             {
-                DerBuf alg;
-                db_init(&alg);
+                DerBuf alg, alg_seq;
+                if (!db_init(&alg) || !db_init(&alg_seq)) {
+                    db_free(&alg); db_free(&alg_seq); db_free(&si);
+                    goto cleanup;
+                }
                 db_der_oid_nid(&alg, NID_sha256);
                 db_der_null(&alg);
-                DerBuf alg_seq;
-                db_init(&alg_seq);
                 db_der_seq(&alg_seq, alg.data, alg.len);
                 db_raw(&si, alg_seq.data, alg_seq.len);
                 db_free(&alg_seq);
@@ -531,12 +534,13 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
 
             /* digestEncryptionAlgorithm = RSA-SHA256 */
             {
-                DerBuf enc_alg;
-                db_init(&enc_alg);
+                DerBuf enc_alg, enc_seq;
+                if (!db_init(&enc_alg) || !db_init(&enc_seq)) {
+                    db_free(&enc_alg); db_free(&enc_seq); db_free(&si);
+                    goto cleanup;
+                }
                 db_der_oid_nid(&enc_alg, NID_rsaEncryption);
                 db_der_null(&enc_alg);
-                DerBuf enc_seq;
-                db_init(&enc_seq);
                 db_der_seq(&enc_seq, enc_alg.data, enc_alg.len);
                 db_raw(&si, enc_seq.data, enc_seq.len);
                 db_free(&enc_seq);
@@ -549,11 +553,12 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
 
             /* signerInfos ::= SET OF { SignerInfo } */
             {
-                DerBuf si_seq;
-                db_init(&si_seq);
+                DerBuf si_seq, si_set;
+                if (!db_init(&si_seq) || !db_init(&si_set)) {
+                    db_free(&si_seq); db_free(&si_set); db_free(&si);
+                    goto cleanup;
+                }
                 db_der_seq(&si_seq, si.data, si.len);
-                DerBuf si_set;
-                db_init(&si_set);
                 db_der_set(&si_set, si_seq.data, si_seq.len);
                 db_raw(&signed_data, si_set.data, si_set.len);
                 db_free(&si_set);
@@ -566,14 +571,15 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
     /* 6. Wrap as ContentInfo: SEQUENCE { OID(pkcs7-signedData), [0] { signedData } } */
     {
         DerBuf ci;
-        db_init(&ci);
+        if (!db_init(&ci))
+            goto cleanup;
         /* ContentInfo OID */
         db_der_oid_str(&ci, "1.2.840.113549.1.7.2");
 
         /* [0] EXPLICIT — wrap SignedData in its own SEQUENCE first */
         {
             DerBuf sd_seq;
-            db_init(&sd_seq);
+            if (!db_init(&sd_seq)) { db_free(&ci); goto cleanup; }
             db_der_seq(&sd_seq, signed_data.data, signed_data.len);
 
             db_tag(&ci, 0xA0, sd_seq.len);
@@ -584,20 +590,23 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
         /* Final outer SEQUENCE */
         {
             DerBuf outer;
-            db_init(&outer);
+            if (!db_init(&outer)) { db_free(&ci); goto cleanup; }
             db_der_seq(&outer, ci.data, ci.len);
 
             *out_len = (int)outer.len;
-            unsigned char *result = (unsigned char *)OPENSSL_malloc(outer.len);
+            result = (unsigned char *)OPENSSL_malloc(outer.len);
             if (result) memcpy(result, outer.data, outer.len);
             db_free(&outer);
             db_free(&ci);
-            db_free(&signed_data);
-            if (der_attrs) OPENSSL_free(der_attrs);
-            if (sig) OPENSSL_free(sig);
-            return result;
         }
     }
+
+cleanup:
+    db_free(&signed_data);
+    if (cert_der) OPENSSL_free(cert_der);
+    if (der_attrs) OPENSSL_free(der_attrs);
+    if (sig) OPENSSL_free(sig);
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
