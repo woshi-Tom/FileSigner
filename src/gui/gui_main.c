@@ -60,7 +60,7 @@
 #define W_CLIENT        800
 #define W_EDIT           560
 #define W_BROWSE         86
-#define PAGE_H          620
+#define PAGE_H          660
 
 #define LOG_COLOR_INFO  0
 #define LOG_COLOR_OK    1
@@ -270,9 +270,8 @@ create_sign_page(HWND parent)
     y += LH + 4;
 
     g_hLog = make_ctrl(g_hPageSign, L"LISTBOX", L"",
-                        WS_BORDER | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT,
+                        WS_BORDER | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
                         0, y, W_CLIENT - 2*PAD, 200, IDC_LIST_LOG);
-    SendMessageW(g_hLog, LB_SETITEMHEIGHT, 0, 18);
 
     g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
@@ -598,9 +597,15 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
     case WM_CTLCOLORLISTBOX: {
         HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, g_clrLogText);
-        SetBkColor(hdc, g_clrLogBg);
-        return (LRESULT)g_hbrLogBg;
+        HWND hCtrl = (HWND)lParam;
+        if (hCtrl == g_hLog) {
+            SetTextColor(hdc, g_clrLogText);
+            SetBkColor(hdc, g_clrLogBg);
+            return (LRESULT)g_hbrLogBg;
+        }
+        SetTextColor(hdc, g_clrText);
+        SetBkColor(hdc, g_clrBg);
+        return (LRESULT)g_hbrBg;
     }
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -621,32 +626,10 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         FillRect((HDC)wParam, &rc, g_hbrBg);
         return 1;
     }
-    case WM_MEASUREITEM: {
-        MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
-        if (mis->CtlType == ODT_LISTBOX) {
-            mis->itemHeight = 18;
-            return TRUE;
-        }
+    case WM_MEASUREITEM:
         return FALSE;
-    }
-    case WM_DRAWITEM: {
-        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lParam;
-        if (dis->CtlType == ODT_LISTBOX && dis->itemID != (UINT)-1) {
-            wchar_t buf[2048];
-            buf[0] = L'\0';
-            SendMessageW(dis->hwndItem, LB_GETTEXT, (WPARAM)dis->itemID, (LPARAM)buf);
-            COLORREF color = g_log_colors[0];
-            LRESULT data = SendMessageW(dis->hwndItem, LB_GETITEMDATA, (WPARAM)dis->itemID, 0);
-            if (data != LB_ERR && data >= 0 && data < (LRESULT)(sizeof(g_log_colors)/sizeof(g_log_colors[0])))
-                color = g_log_colors[data];
-            SetBkColor(dis->hDC, g_clrLogBg);
-            SetTextColor(dis->hDC, color);
-            ExtTextOutW(dis->hDC, dis->rcItem.left + 4, dis->rcItem.top + 1,
-                        ETO_OPAQUE | ETO_CLIPPED, &dis->rcItem, buf, (UINT)wcslen(buf), NULL);
-            return TRUE;
-        }
+    case WM_DRAWITEM:
         return FALSE;
-    }
     case WM_NOTIFY: {
         NMHDR *nmh = (NMHDR *)lParam;
         if (nmh->idFrom == IDC_TAB && nmh->code == TCN_SELCHANGE) {
@@ -799,17 +782,46 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             EnableWindow(GetDlgItem(hwnd, IDC_BTN_TEST_TSA), FALSE);
             SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"\u6D4B\u8BD5\u4E2D...");
 
-            int latency = 0;
-            int best = timestamp_find_fastest(&latency);
+            log_message(LOG_COLOR_INFO, L"\u5F00\u59CB\u6D4B\u8BD5 %d \u4E2A\u65F6\u95F4\u6233\u670D\u52A1\u5668...", TSA_SERVER_COUNT);
+            UpdateWindow(g_hLog);
 
-            if (best >= 0) {
+            int best_idx = -1, best_latency = 0;
+
+            for (int i = 0; i < TSA_SERVER_COUNT; i++) {
+                wchar_t wlabel[256];
+                MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].label, -1, wlabel, 256);
+                log_message(LOG_COLOR_INFO, L"  \u2192 %s...", wlabel);
+                UpdateWindow(g_hLog);
+
+                DWORD t0 = GetTickCount();
+                int ok = timestamp_test_server(g_tsa_servers[i].url);
+                DWORD elapsed = GetTickCount() - t0;
+
+                if (ok) {
+                    log_message(LOG_COLOR_OK, L"    \u2713 %s \u2014 %lu ms", wlabel, elapsed);
+                    if (best_idx < 0 || (int)elapsed < best_latency) {
+                        best_idx = i;
+                        best_latency = (int)elapsed;
+                    }
+                } else {
+                    log_message(LOG_COLOR_FAIL, L"    \u2717 %s \u2014 \u4E0D\u53EF\u8FBE", wlabel);
+                }
+                UpdateWindow(g_hLog);
+            }
+
+            if (best_idx >= 0) {
+                wchar_t wlabel[256];
+                MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[best_idx].label, -1, wlabel, 256);
+                log_message(LOG_COLOR_OK, L"\u6700\u5FEB\u670D\u52A1\u5668: %s (%d ms)", wlabel, best_latency);
+
                 HWND hCombo = GetDlgItem(g_hPageSign, IDC_COMBO_TSA);
-                SendMessageW(hCombo, CB_SETCURSEL, best, 0);
+                SendMessageW(hCombo, CB_SETCURSEL, best_idx, 0);
+
                 wchar_t msg[128];
-                swprintf(msg, 128, L"\u6700\u5FEB: %S (%d ms)",
-                         g_tsa_servers[best].label, latency);
+                swprintf(msg, 128, L"\u6700\u5FEB: %s (%d ms)", wlabel, best_latency);
                 MessageBoxW(hwnd, msg, L"\u6D4B\u901F\u5B8C\u6210", MB_OK | MB_ICONINFORMATION);
             } else {
+                log_message(LOG_COLOR_FAIL, L"\u6240\u6709\u65F6\u95F4\u6233\u670D\u52A1\u5668\u5747\u4E0D\u53EF\u8FBE");
                 MessageBoxW(hwnd, L"\u6240\u6709\u65F6\u95F4\u6233\u670D\u52A1\u5668\u5747\u4E0D\u53EF\u8FBE\u3002\n\u8BF7\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5\u3002",
                             L"\u6D4B\u901F\u5931\u8D25", MB_OK | MB_ICONERROR);
             }
