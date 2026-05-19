@@ -28,6 +28,8 @@ static uint32_t calc_checksum(const uint8_t *data, size_t size,
     if (size & 1)
         sum += (uint32_t)data[size - 1];
 
+    /* Standard CheckSumMappedFile folds file size (as DWORD) into the result */
+    sum += (uint32_t)size;
     sum = (sum & 0xFFFF) + (sum >> 16);
     sum += (sum >> 16);
     return (uint32_t)(sum & 0xFFFF);
@@ -70,7 +72,8 @@ PE_FILE* pe_load(const char *path)
 
     /* PE signature */
     pe_offset = pe->dos->e_lfanew;
-    if (pe_offset + 4 > file_size ||
+    if (pe_offset < sizeof(DOS_HEADER) ||   /* must be past DOS header */
+        pe_offset + 4 > file_size ||
         *(uint32_t *)(raw + pe_offset) != PE_SIGNATURE) {
         pe_free(pe);
         return NULL;

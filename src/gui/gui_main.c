@@ -114,6 +114,7 @@ static COLORREF g_clrBorder   = RGB(208, 214, 224);
 
 static HWND g_hwndMain, g_hTab, g_hPageSign, g_hPageCert, g_hProgress, g_hLog;
 static HANDLE g_hThread;
+static HANDLE g_hCertThread;
 static const COLORREF g_log_colors[] = {
     RGB(232, 233, 237),
     RGB(74, 222, 128),
@@ -564,6 +565,11 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_APP_CERT_DONE: {
         CertTask *task = (CertTask *)lParam;
         int ok = (int)wParam;
+        if (g_hCertThread) {
+            WaitForSingleObject(g_hCertThread, INFINITE);
+            CloseHandle(g_hCertThread);
+            g_hCertThread = NULL;
+        }
         if (ok) {
             wchar_t msg[512];
             swprintf(msg, 512,
@@ -1029,16 +1035,16 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 MessageBoxW(hwnd, L"\u65E0\u6CD5\u521B\u5EFA\u8BC1\u4E66\u751F\u6210\u7EBF\u7A0B\u3002",
                             L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
             } else {
-                CloseHandle(hThread);
+                g_hCertThread = hThread;
             }
         }
 
         return 0;
     }
     case WM_CLOSE: {
-        if (g_hThread) {
+        if (g_hThread || g_hCertThread) {
             if (IDYES != MessageBoxW(hwnd,
-                    L"\u7B7E\u540D\u64CD\u4F5C\u5C1A\u672A\u5B8C\u6210\uFF0C\u786E\u5B9A\u8981\u5173\u95ED\u5417\uFF1F",
+                    L"\u64CD\u4F5C\u5C1A\u672A\u5B8C\u6210\uFF0C\u786E\u5B9A\u8981\u5173\u95ED\u5417\uFF1F",
                     L"FileSigner", MB_YESNO | MB_ICONWARNING))
                 return 0;
         }
@@ -1050,6 +1056,11 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WaitForSingleObject(g_hThread, INFINITE);
             CloseHandle(g_hThread);
             g_hThread = NULL;
+        }
+        if (g_hCertThread) {
+            WaitForSingleObject(g_hCertThread, INFINITE);
+            CloseHandle(g_hCertThread);
+            g_hCertThread = NULL;
         }
         PostQuitMessage(0);
         return 0;

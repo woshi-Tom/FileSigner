@@ -803,17 +803,33 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
             goto cleanup;
         }
 
-        /* Check all certs in the PKCS#7 for a match */
-        if (p7->d.sign->cert) {
-            for (int i = 0; i < sk_X509_num(p7->d.sign->cert); i++) {
-                if (X509_cmp(sk_X509_value(p7->d.sign->cert, i), ca_cert) == 0) {
-                    found = 1; break;
+        /* Verify that the signer certificate was actually issued/signed
+         * by the CA's private key.  A simple X509_cmp match is insufficient
+         * — an attacker could embed the target CA cert in the PKCS#7 list
+         * without it ever signing the signer. */
+        {
+            STACK_OF(X509) *signers = PKCS7_get0_signers(p7, NULL, 0);
+            if (signers) {
+                for (int i = 0; i < sk_X509_num(signers); i++) {
+                    X509 *signer = sk_X509_value(signers, i);
+                    /* Name check: signer's issuer must match CA's subject */
+                    if (X509_check_issued(ca_cert, signer) != X509_V_OK)
+                        continue;
+                    /* Cryptographic check: signer's signature must be
+                     * verifiable with the CA's public key */
+                    EVP_PKEY *ca_pkey = X509_get_pubkey(ca_cert);
+                    if (ca_pkey) {
+                        found = (X509_verify(signer, ca_pkey) == 1);
+                        EVP_PKEY_free(ca_pkey);
+                    }
+                    if (found) break;
                 }
+                OPENSSL_free(signers);
             }
         }
         X509_free(ca_cert);
         if (!found) {
-            fprintf(stderr, "CA certificate not found in signature chain\n");
+            fprintf(stderr, "CA certificate did not issue/sign the signer certificate\n");
             goto cleanup;
         }
         printf("CA certificate chain verified\n");
@@ -825,7 +841,8 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
             PKCS7_get_signer_info(p7), 0);
         if (si) {
             int md_nid = OBJ_txt2nid("1.2.840.113549.1.9.4");
-            ASN1_TYPE *md_val = PKCS7_get_signed_attribute(si, md_nid);
+            ASN1_TYPE *md_val = (md_nid != NID_undef)
+                ? PKCS7_get_signed_attribute(si, md_nid) : NULL;
             if (md_val && md_val->type == V_ASN1_OCTET_STRING) {
                 /* messageDigest present — verify PE hash */
                 unsigned char pe_hash[EVP_MAX_MD_SIZE];
