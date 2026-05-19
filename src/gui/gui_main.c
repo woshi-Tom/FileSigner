@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include "cert_gen.h"
 #include "authenticode.h"
@@ -18,7 +19,6 @@
 #pragma comment(lib, "ole32.lib")
 
 /* Subclass procedure for page panels (STATIC) — forward WM_COMMAND to main window */
-#include <commctrl.h>
 static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                       UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
@@ -69,13 +69,16 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 static void wide_from_utf8(const char *src, wchar_t *dst, int dst_chars);
 static void wide_to_utf8(const wchar_t *src, char *dst, int dst_chars);
 
+/* Path buffer size — must match MAX_PATH_LEN in file_utils.h */
+#define GUI_PATH_LEN    4096
+
 typedef struct {
     HWND hwnd; /* main window to post messages to */
-    char target[MAX_PATH];
-    char pfx[MAX_PATH];
+    char target[GUI_PATH_LEN];
+    char pfx[GUI_PATH_LEN];
     char password[256];
     char ts_url[512];
-    char outdir[MAX_PATH];
+    char outdir[GUI_PATH_LEN];
     int recursive;
     int force;
     int debug;
@@ -128,25 +131,25 @@ static void thread_progress_cb(const char *filename, int current, int total,
         int percent = (int)(current * 100 / total);
         post_progress(task->hwnd, percent);
     }
-    wchar_t wfilename[MAX_PATH];
-    wide_from_utf8(filename, wfilename, MAX_PATH);
+    wchar_t wfilename[GUI_PATH_LEN];
+    wide_from_utf8(filename, wfilename, GUI_PATH_LEN);
 
     if (success == 1) {
-        wchar_t msg[MAX_PATH + 32];
+        wchar_t msg[GUI_PATH_LEN + 64];
         wsprintfW(msg, L"[OK] %s", wfilename);
         post_log_wstr(task->hwnd, msg);
     } else if (success == -2) {
-        wchar_t msg[MAX_PATH + 64];
+        wchar_t msg[GUI_PATH_LEN + 64];
         wsprintfW(msg, L"[跳过] %s (已签名，请勾选\"强制重新签名\")", wfilename);
         post_log_wstr(task->hwnd, msg);
     } else if (success == -3) {
         post_log_wstr(task->hwnd, wfilename);
     } else if (success == -4) {
-        wchar_t msg[MAX_PATH + 32];
+        wchar_t msg[GUI_PATH_LEN + 64];
         wsprintfW(msg, L"  %s", wfilename);
         post_log_wstr(task->hwnd, msg);
     } else if (success == 0) {
-        wchar_t msg[MAX_PATH + 32];
+        wchar_t msg[GUI_PATH_LEN + 64];
         wsprintfW(msg, L"[失败] %s", wfilename);
         post_log_wstr(task->hwnd, msg);
     }
@@ -183,9 +186,9 @@ static DWORD WINAPI sign_thread_proc(LPVOID param)
             }
             post_progress(hwnd, 100);
         } else {
-            wchar_t wmsg[MAX_PATH + 32];
-            wchar_t wtarget[MAX_PATH];
-            wide_from_utf8(task->target, wtarget, MAX_PATH);
+            wchar_t wmsg[GUI_PATH_LEN + 64];
+            wchar_t wtarget[GUI_PATH_LEN];
+            wide_from_utf8(task->target, wtarget, GUI_PATH_LEN);
             wsprintfW(wmsg, L"错误: 目标不存在: %s", wtarget);
             post_log_wstr(hwnd, wmsg);
         }
@@ -746,32 +749,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int id = LOWORD(wParam);
 
         if (id == IDC_BTN_BROWSE_TGT) {
-            wchar_t path[MAX_PATH] = {0};
+            wchar_t path[GUI_PATH_LEN] = {0};
             if (browse_folder(hwnd, L"选择目标目录", path))
                 SetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, path);
         }
         else if (id == IDC_BTN_BROWSE_PFX) {
-            wchar_t path[MAX_PATH] = {0};
+            wchar_t path[GUI_PATH_LEN] = {0};
             if (browse_file(hwnd,
                             L"PFX 文件" L"\0" L"*.pfx;*.p12"
                             L"\0" L"所有文件" L"\0" L"*.*" L"\0",
-                            L"选择 PFX 文件", path, MAX_PATH))
+                            L"选择 PFX 文件", path, GUI_PATH_LEN))
                 SetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, path);
         }
         else if (id == IDC_BTN_BROWSE_OUT) {
-            wchar_t path[MAX_PATH] = {0};
+            wchar_t path[GUI_PATH_LEN] = {0};
             if (browse_folder(hwnd, L"选择输出目录", path))
                 SetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, path);
         }
         else if (id == IDC_BTN_SIGN) {
-            wchar_t wtarget[MAX_PATH], wpfx[MAX_PATH], wpassword[256];
-            wchar_t wts_url[512], woutdir[MAX_PATH];
+            wchar_t wtarget[GUI_PATH_LEN], wpfx[GUI_PATH_LEN], wpassword[256];
+            wchar_t wts_url[512], woutdir[GUI_PATH_LEN];
 
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, wtarget, MAX_PATH);
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, wpfx, MAX_PATH);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, wtarget, GUI_PATH_LEN);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, wpfx, GUI_PATH_LEN);
             GetDlgItemTextW(g_hPageSign, IDC_EDIT_PASSWORD, wpassword, 256);
             GetDlgItemTextW(g_hPageSign, IDC_EDIT_TIMESTAMP, wts_url, 512);
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, woutdir, MAX_PATH);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, woutdir, GUI_PATH_LEN);
 
             if (wcslen(wtarget) == 0) {
                 MessageBoxW(hwnd, L"请选择目标文件或目录。",
@@ -788,13 +791,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int force = IsDlgButtonChecked(g_hPageSign, IDC_CHK_FORCE) == BST_CHECKED;
             g_debug = IsDlgButtonChecked(g_hPageSign, IDC_CHK_DEBUG) == BST_CHECKED;
 
-            char target[MAX_PATH], pfx[MAX_PATH], password[256];
-            char ts_url[512], outdir[MAX_PATH];
-            wide_to_utf8(wtarget, target, MAX_PATH);
-            wide_to_utf8(wpfx, pfx, MAX_PATH);
+            char target[GUI_PATH_LEN], pfx[GUI_PATH_LEN], password[256];
+            char ts_url[512], outdir[GUI_PATH_LEN];
+            wide_to_utf8(wtarget, target, GUI_PATH_LEN);
+            wide_to_utf8(wpfx, pfx, GUI_PATH_LEN);
             wide_to_utf8(wpassword, password, 256);
             wide_to_utf8(wts_url, ts_url, 512);
-            wide_to_utf8(woutdir, outdir, MAX_PATH);
+            wide_to_utf8(woutdir, outdir, GUI_PATH_LEN);
 
             /* Prevent concurrent signing */
             if (g_hThread) {
@@ -836,14 +839,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         else if (id == IDC_BTN_BROWSE_CD) {
-            wchar_t path[MAX_PATH] = {0};
+            wchar_t path[GUI_PATH_LEN] = {0};
             if (browse_folder(hwnd, L"选择输出目录", path))
                 SetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, path);
         }
         else if (id == IDC_BTN_GENERATE) {
-            wchar_t wdir[MAX_PATH], wdays_str[16], wpw[256];
+            wchar_t wdir[GUI_PATH_LEN], wdays_str[16], wpw[256];
             wchar_t wcn[256], wemail[256];
-            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, wdir, MAX_PATH);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, wdir, GUI_PATH_LEN);
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DAYS, wdays_str, 16);
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_PW, wpw, 256);
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_CN, wcn, 256);
@@ -858,8 +861,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int days = _wtoi(wdays_str);
             if (days <= 0) days = 90;
 
-            char dir[MAX_PATH], pw[256], cn[256], email[256];
-            wide_to_utf8(wdir, dir, MAX_PATH);
+            char dir[GUI_PATH_LEN], pw[256], cn[256], email[256];
+            wide_to_utf8(wdir, dir, GUI_PATH_LEN);
             wide_to_utf8(wpw, pw, 256);
             wide_to_utf8(wcn, cn, 256);
             wide_to_utf8(wemail, email, 256);
@@ -915,12 +918,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;  /* fall through to DefWindowProcW */
 
     case WM_DESTROY:
-        /* Wait for thread if still running (defensive) */
         if (g_hThread) {
             WaitForSingleObject(g_hThread, INFINITE);
             CloseHandle(g_hThread);
             g_hThread = NULL;
         }
+        RemoveWindowSubclass(g_hPageSign, page_subclass, 0);
+        RemoveWindowSubclass(g_hPageCert, page_subclass, 0);
         PostQuitMessage(0);
         return 0;
     }
@@ -936,9 +940,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
  * as fallback when __try/__except can't catch (e.g. stack overflow) */
 static LONG WINAPI crash_dump_filter(EXCEPTION_POINTERS *ep)
 {
-    wchar_t logpath[MAX_PATH];
-    DWORD len = GetTempPathW(MAX_PATH, logpath);
-    if (len > 0 && len < MAX_PATH - 30) {
+    wchar_t logpath[GUI_PATH_LEN];
+    DWORD len = GetTempPathW(GUI_PATH_LEN, logpath);
+    if (len > 0 && len < GUI_PATH_LEN - 30) {
         wcscat(logpath, L"filesigner_crash.log");
         HANDLE f = CreateFileW(logpath, GENERIC_WRITE, 0, NULL,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -1029,7 +1033,7 @@ int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     hwnd = CreateWindowExW(0, L"FileSignerGUI",
                             L"FileSigner  Authenticode PE 签名工具",
-                            WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
+                            WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
                             win_x, win_y, win_w, win_h,
                             NULL, NULL, g_hInst, NULL);
 

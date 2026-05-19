@@ -725,6 +725,48 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         goto cleanup;
     }
 
+    /* Verify cryptographic signature.
+     * Authenticode uses SPC_PE_IMAGE_DATA as content-type OID, which
+     * PKCS7_verify doesn't understand. We temporarily override it to
+     * NID_pkcs7_data so OpenSSL can verify the signature, then restore. */
+    {
+        int sig_ok = 0;
+        if (p7->d.sign->contents && p7->d.sign->contents->d.data &&
+            p7->d.sign->contents->d.data->data &&
+            p7->d.sign->contents->d.data->length > 0) {
+
+            ASN1_OBJECT *saved_type = p7->d.sign->contents->type;
+            ASN1_OBJECT *data_obj = OBJ_nid2obj(NID_pkcs7_data);
+            if (data_obj) {
+                p7->d.sign->contents->type = data_obj;
+
+                BIO *cont = BIO_new_mem_buf(
+                    p7->d.sign->contents->d.data->data,
+                    p7->d.sign->contents->d.data->length);
+                if (cont) {
+                    if (PKCS7_verify(p7, NULL, NULL, cont, NULL,
+                                     PKCS7_NOVERIFY) == 1) {
+                        sig_ok = 1;
+                    } else {
+                        unsigned long err = ERR_get_error();
+                        char errbuf[256];
+                        ERR_error_string_n(err, errbuf, sizeof(errbuf));
+                        fprintf(stderr, "[verify] crypto sig error: %s\n", errbuf);
+                    }
+                    BIO_free(cont);
+                }
+                /* Restore original type — PKCS7_free frees saved_type */
+                p7->d.sign->contents->type = saved_type;
+            }
+        }
+        if (!sig_ok) {
+            fprintf(stderr, "Cryptographic signature verification FAILED — "
+                            "file may have been tampered with\n");
+            goto cleanup;
+        }
+        fprintf(stderr, "[verify] Cryptographic signature OK\n");
+    }
+
     /* Verify certificate chain (if CA provided) */
     if (ca_path) {
         FILE *fp = fopen_utf8(ca_path, "rb");

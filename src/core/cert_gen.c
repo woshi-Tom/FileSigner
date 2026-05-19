@@ -201,42 +201,6 @@ static X509* create_signer_cert(EVP_PKEY *signer_key, X509 *ca_cert,
     return cert;
 }
 
-/* Export PFX (PKCS#12) containing signer cert + key + CA chain */
-static int write_pfx(const char *path, EVP_PKEY *key, X509 *cert,
-                      X509 *ca_cert, const char *password)
-{
-    PKCS12 *p12;
-    FILE *fp;
-    int ret;
-    STACK_OF(X509) *extra = NULL;
-
-    if (ca_cert) {
-        extra = sk_X509_new_null();
-        if (extra) sk_X509_push(extra, ca_cert);
-    }
-
-    p12 = PKCS12_create(
-        (char *)password,           /* export password */
-        CERT_SIGNER_CN,             /* friendly name */
-        key,                        /* private key */
-        cert,                       /* signer certificate */
-        extra,                      /* extra certs (CA chain) */
-        0, 0, 0, 0, 0
-    );
-
-    if (extra) sk_X509_free(extra);
-    if (!p12) return 0;
-
-    fp = fopen_utf8(path, "wb");
-    if (!fp) { PKCS12_free(p12); return 0; }
-
-    ret = i2d_PKCS12_fp(fp, p12);
-    fclose(fp);
-    PKCS12_free(p12);
-
-    return ret > 0;
-}
-
 /* ------------------------------------------------------------------ */
 
 int cert_generate(const char *output_dir,

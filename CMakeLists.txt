@@ -72,11 +72,16 @@ endif()
 
 target_link_libraries(filesigner
     OpenSSL::Crypto
-    winhttp
-    crypt32
-    comctl32
-    ole32
 )
+
+if(WIN32)
+    target_link_libraries(filesigner
+        winhttp
+        crypt32
+        comctl32
+        ole32
+    )
+endif()
 
 # Install
 install(TARGETS filesigner

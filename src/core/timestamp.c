@@ -154,13 +154,23 @@ static unsigned char* build_timestamp_request(const unsigned char *digest,
     /* 5. Assemble inner: version + MessageImprint SEQUENCE + certReq(TRUE) */
     unsigned char inner[1024];
     int ipos = 0;
+    #define CHECK_BOUNDS(n) do { if ((int)(n) > (int)sizeof(inner) - ipos) return NULL; } while(0)
+    CHECK_BOUNDS(vl);
     memcpy(inner + ipos, ver, vl); ipos += vl;
-    ipos += der_write_tag_len(inner + ipos, 0x30, mi_body);
+    {
+        int tl = der_write_tag_len(inner + ipos, 0x30, mi_body);
+        CHECK_BOUNDS(tl); ipos += tl;
+    }
+    CHECK_BOUNDS(alg_len);
     memcpy(inner + ipos, alg_id, alg_len); ipos += alg_len;
+    CHECK_BOUNDS(hh_len);
     memcpy(inner + ipos, hash_hdr, hh_len); ipos += hh_len;
+    CHECK_BOUNDS((int)digest_len);
     memcpy(inner + ipos, digest, (int)digest_len); ipos += (int)digest_len;
     /* certReq = TRUE */
+    CHECK_BOUNDS(3);
     inner[ipos++] = 0x01; inner[ipos++] = 0x01; inner[ipos++] = 0xFF;
+    #undef CHECK_BOUNDS
 
     /* 6. Outer SEQUENCE */
     unsigned char *result = (unsigned char *)malloc((size_t)ipos + 5);
