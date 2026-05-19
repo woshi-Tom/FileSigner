@@ -1,15 +1,13 @@
 #define WIN32_LEAN_AND_MEAN
 #define UNICODE
 #include <windows.h>
-#include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
-#include <shellapi.h>
+#include <commctrl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-
-#define _CRT_SECURE_NO_WARNINGS
+#include <stdlib.h>
+#include <stdarg.h>
 
 #include "authenticode.h"
 #include "batch_signer.h"
@@ -17,812 +15,870 @@
 #include "timestamp.h"
 #include "resource.h"
 
-#define WC_FILESIGNER L"FileSignerWindow"
-#define WM_GUI_UPDATE_ROW  (WM_APP + 1)
-#define WM_GUI_SIGN_DONE   (WM_APP + 2)
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "ole32.lib")
 
-enum { LV_COL_FILE = 0, LV_COL_STATUS, LV_COL_TSA, LV_COL_RESULT, LV_COL_COUNT };
-enum { STAT_PART_INFO = 0, STAT_PART_COUNT };
+/* Control IDs */
+#define IDC_TAB             100
 
-enum { LV_STATUS_PENDING = 0, LV_STATUS_SIGNING, LV_STATUS_OK, LV_STATUS_FAIL };
+#define IDC_EDIT_TARGET     201
+#define IDC_BTN_BROWSE_TGT  202
+#define IDC_EDIT_PFX        203
+#define IDC_BTN_BROWSE_PFX  204
+#define IDC_EDIT_PASSWORD   205
+#define IDC_COMBO_TSA       206
+#define IDC_BTN_TEST_TSA    207
+#define IDC_CHK_RECURSIVE   208
+#define IDC_CHK_FORCE       209
+#define IDC_EDIT_OUTDIR     210
+#define IDC_BTN_BROWSE_OUT  211
+#define IDC_BTN_SIGN        212
+#define IDC_PROGRESS        213
+#define IDC_LIST_LOG        214
+#define IDC_LBL_LOG_TITLE   215
 
-#define ID_TB_ADD_FILES   100
-#define ID_TB_ADD_FOLDER  101
-#define ID_TB_START_SIGN  102
+#define IDC_EDIT_CERT_DIR   301
+#define IDC_BTN_BROWSE_CD   302
+#define IDC_EDIT_CERT_DAYS  303
+#define IDC_BTN_GENERATE    304
+#define IDC_LBL_CERT_STATUS 305
+#define IDC_EDIT_CERT_PW    306
+#define IDC_EDIT_CERT_CN    307
+#define IDC_EDIT_CERT_EMAIL 308
+#define IDC_LBL_CERT_TITLE  309
 
-#define ID_FILE_ADD_FILES   40001
-#define ID_FILE_ADD_FOLDER  40002
-#define ID_FILE_EXIT        40003
-#define ID_ACTION_START     40010
-#define ID_ACTION_CLEAR     40011
-#define ID_SETTINGS_TSA     40020
-#define ID_CERT_GEN         40021
-#define ID_HELP_ABOUT       40030
+#define WM_APP_LOG          (WM_APP + 1)
+#define WM_APP_PROGRESS     (WM_APP + 2)
+#define WM_APP_SIGN_DONE    (WM_APP + 3)
 
-#define MAX_STR         1024
+#define GUI_PATH_LEN    4096
+
+/* Layout */
+#define PAD             16
+#define LH              18
+#define EH              28
+#define W_CLIENT        800
+#define W_EDIT           560
+#define W_BROWSE         86
+#define PAGE_H          620
+
+#define LOG_COLOR_INFO  0
+#define LOG_COLOR_OK    1
+#define LOG_COLOR_FAIL  2
+#define LOG_COLOR_SKIP  3
 
 typedef struct {
-    char pfx_path[MAX_PATH];
-    char pfx_password[512];
-    char tsa_url[512];
-    char output_dir[MAX_PATH];
-    int  force;
-} SignJobParams;
-
-typedef struct {
-    int   count;
-    int   *lv_rows;
-    WCHAR **paths;
-    SignJobParams params;
-} SignJob;
+    HWND hwnd;
+    char target[GUI_PATH_LEN];
+    char pfx[GUI_PATH_LEN];
+    char password[256];
+    char ts_url[512];
+    char outdir[GUI_PATH_LEN];
+    int recursive;
+    int force;
+} SignTask;
 
 static HINSTANCE g_hInst;
-static HWND g_hwndMain, g_hwndLV, g_hwndStatus, g_hwndTB;
-static int g_signing;
+static HFONT g_hFont;
+static HFONT g_hFontSection;
+static HFONT g_hMonoFont;
+static HBRUSH g_hbrBg, g_hbrLogBg, g_hbrEditBg, g_hbrBtnFace, g_hbrAccent;
 
-static const WCHAR *
-lvs_text(int status)
+static COLORREF g_clrBg       = RGB(244, 245, 248);
+static COLORREF g_clrLogBg    = RGB(34, 35, 38);
+static COLORREF g_clrLogText  = RGB(232, 233, 237);
+static COLORREF g_clrAccent   = RGB(94, 106, 210);
+static COLORREF g_clrText     = RGB(43, 43, 47);
+static COLORREF g_clrLabel    = RGB(100, 104, 112);
+static COLORREF g_clrEditBg   = RGB(255, 255, 255);
+static COLORREF g_clrBorder   = RGB(208, 214, 224);
+
+static HWND g_hwndMain, g_hTab, g_hPageSign, g_hPageCert, g_hProgress, g_hLog;
+static HANDLE g_hThread;
+static const COLORREF g_log_colors[] = {
+    RGB(232, 233, 237),
+    RGB(74, 222, 128),
+    RGB(248, 113, 113),
+    RGB(155, 155, 173),
+};
+
+/* ---------------------------------------------------------------- */
+/* Helpers                                                          */
+/* ---------------------------------------------------------------- */
+
+static void
+wide_from_utf8(const char *src, wchar_t *dst, int dst_chars)
 {
-    switch (status) {
-    case LV_STATUS_PENDING: return L"Pending";
-    case LV_STATUS_SIGNING: return L"Signing...";
-    case LV_STATUS_OK:      return L"Signed";
-    case LV_STATUS_FAIL:    return L"Failed";
-    default:                return L"";
-    }
+    if (!src || !dst || dst_chars <= 0) { if (dst && dst_chars > 0) dst[0] = L'\0'; return; }
+    if (!src[0]) { dst[0] = L'\0'; return; }
+    MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, dst_chars);
 }
 
 static void
-status_bar_set_part_text(HWND hwnd, int part, const WCHAR *text)
+wide_to_utf8(const wchar_t *src, char *dst, int dst_chars)
 {
-    SendMessageW(hwnd, SB_SETTEXTW, (WPARAM)part, (LPARAM)text);
+    if (!src || !src[0]) { dst[0] = '\0'; return; }
+    WideCharToMultiByte(CP_UTF8, 0, src, -1, dst, dst_chars, NULL, NULL);
 }
 
 static void
-update_status_bar(void)
+log_message(int color, const wchar_t *fmt, ...)
 {
-    if (!g_hwndStatus) return;
-    WCHAR buf[128];
-    int count = ListView_GetItemCount(g_hwndLV);
-    if (g_signing)
-        swprintf(buf, 128, L"Signing in progress...  Total: %d", count);
-    else
-        swprintf(buf, 128, L"Ready  |  Files: %d", count);
-    status_bar_set_part_text(g_hwndStatus, STAT_PART_INFO, buf);
+    wchar_t buf[2048];
+    va_list args;
+    va_start(args, fmt);
+    vswprintf(buf, sizeof(buf) / sizeof(wchar_t), fmt, args);
+    va_end(args);
+    int idx = (int)SendMessageW(g_hLog, LB_ADDSTRING, 0, (LPARAM)buf);
+    SendMessageW(g_hLog, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)color);
+    SendMessageW(g_hLog, LB_SETTOPINDEX, idx, 0);
 }
 
-
-/* ---------------------------------------------------------------- */
-/* ListView helpers                                                 */
-/* ---------------------------------------------------------------- */
-
-static int
-lv_add_item(HWND hwndLV, const WCHAR *path)
+static HWND
+make_edit(HWND parent, const wchar_t *text, int x, int y, int w, int id)
 {
-    LVITEMW lvi;
-    memset(&lvi, 0, sizeof(lvi));
-    lvi.mask     = LVIF_TEXT | LVIF_PARAM;
-    lvi.iItem    = INT_MAX;
-    lvi.pszText  = (WCHAR *)path;
-    lvi.lParam   = (LPARAM)_wcsdup(path);
-
-    int idx = (int)SendMessageW(hwndLV, LVM_INSERTITEMW, 0, (LPARAM)&lvi);
-    if (idx >= 0) {
-        lvi.mask     = LVIF_TEXT;
-        lvi.iSubItem = LV_COL_STATUS;
-        lvi.pszText  = (WCHAR *)L"Pending";
-        SendMessageW(hwndLV, LVM_SETITEMW, 0, (LPARAM)&lvi);
-    }
-    return idx;
+    return make_ctrl(parent, L"EDIT", text,
+                     WS_BORDER | ES_AUTOHSCROLL, x, y, w, EH, id);
 }
 
-static void
-lv_update_status(HWND hwndLV, int row, int status)
+static HWND
+make_ctrl(HWND parent, const wchar_t *cls, const wchar_t *text,
+          DWORD style, int x, int y, int w, int ht, int id)
 {
-    LVITEMW lvi;
-    memset(&lvi, 0, sizeof(lvi));
-    lvi.mask     = LVIF_TEXT;
-    lvi.iItem    = row;
-    lvi.iSubItem = LV_COL_STATUS;
-    lvi.pszText  = (WCHAR *)lvs_text(status);
-    SendMessageW(hwndLV, LVM_SETITEMW, 0, (LPARAM)&lvi);
+    HWND hw = CreateWindowExW(0, cls, text,
+                               WS_CHILD | WS_VISIBLE | style,
+                               x, y, w, ht,
+                               parent, (HMENU)(INT_PTR)id, g_hInst, NULL);
+    SendMessageW(hw, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    return hw;
 }
 
-static WCHAR *
-lv_get_path(HWND hwndLV, int row)
+static BOOL CALLBACK
+set_font_cb(HWND child, LPARAM lp)
 {
-    LVITEMW lvi;
-    memset(&lvi, 0, sizeof(lvi));
-    lvi.mask   = LVIF_PARAM;
-    lvi.iItem  = row;
-    SendMessageW(hwndLV, LVM_GETITEMW, 0, (LPARAM)&lvi);
-    if (lvi.lParam)
-        return _wcsdup((const WCHAR *)lvi.lParam);
-    return NULL;
+    (void)lp;
+    SendMessageW(child, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    return TRUE;
 }
 
 static void
-lv_clear_all(HWND hwndLV)
+apply_font(HWND parent)
 {
-    /* Free lParam strings */
-    int count = ListView_GetItemCount(hwndLV);
-    for (int i = 0; i < count; i++) {
-        LVITEMW lvi;
-        memset(&lvi, 0, sizeof(lvi));
-        lvi.mask   = LVIF_PARAM;
-        lvi.iItem  = i;
-        SendMessageW(hwndLV, LVM_GETITEMW, 0, (LPARAM)&lvi);
-        if (lvi.lParam) free((void *)lvi.lParam);
-    }
-    ListView_DeleteAllItems(hwndLV);
+    EnumChildWindows(parent, (WNDENUMPROC)set_font_cb, 0);
 }
 
-
 /* ---------------------------------------------------------------- */
-/* Dialogs                                                          */
+/* Sign page                                                        */
 /* ---------------------------------------------------------------- */
 
-static INT_PTR CALLBACK
-sign_settings_dlg(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+static void
+create_sign_page(HWND parent)
 {
-    static SignJobParams *out_params;
-    static WCHAR pfx_buf[MAX_PATH], outdir_buf[MAX_PATH], pw_buf[512], tsa_buf[512];
+    int edit_x = W_CLIENT - 2*PAD - W_BROWSE - 6;
 
-    switch (msg) {
-    case WM_INITDIALOG: {
-        out_params = (SignJobParams *)lParam;
-        /* Populate TSA combo */
-        HWND hCombo = GetDlgItem(hDlg, 1003);
+    g_hPageSign = CreateWindowExW(0, L"STATIC", L"",
+                                   WS_CHILD | WS_VISIBLE,
+                                   PAD, 40, W_CLIENT - 2*PAD, PAGE_H,
+                                   parent, NULL, g_hInst, NULL);
+
+    int y = 8;
+
+    make_ctrl(g_hPageSign, L"STATIC", L"  \u7B7E\u540D\u8BBE\u7F6E",
+              SS_LEFT, 0, y, 300, LH + 2, 0);
+    y += LH + 8;
+
+    make_ctrl(g_hPageSign, L"STATIC", L"\u76EE\u6807 (\u6587\u4EF6\u6216\u76EE\u5F55):",
+              0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
+    make_edit(g_hPageSign, L"", 0, y, W_EDIT, IDC_EDIT_TARGET);
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u6D4F\u89C8...",
+              BS_TEXT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_TGT);
+    y += EH + 6;
+
+    make_ctrl(g_hPageSign, L"STATIC", L"PFX \u8BC1\u4E66\u6587\u4EF6:",
+              0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
+    make_edit(g_hPageSign, L"", 0, y, W_EDIT, IDC_EDIT_PFX);
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u6D4F\u89C8...",
+              BS_TEXT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_PFX);
+    y += EH + 6;
+
+    make_ctrl(g_hPageSign, L"STATIC", L"PFX \u5BC6\u7801:", 0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
+    make_ctrl(g_hPageSign, L"EDIT", L"",
+              WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
+              0, y, 280, EH, IDC_EDIT_PASSWORD);
+    y += EH + 6;
+
+    make_ctrl(g_hPageSign, L"STATIC", L"\u65F6\u95F4\u6233\u670D\u52A1\u5668:",
+              0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
+    {
+        HWND hCombo = CreateWindowExW(0, L"COMBOBOX", NULL,
+            WS_BORDER | WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_HASSTRINGS | WS_VSCROLL,
+            0, y, W_EDIT - 90, 250,
+            g_hPageSign, (HMENU)(INT_PTR)IDC_COMBO_TSA, g_hInst, NULL);
+        SendMessageW(hCombo, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         for (int i = 0; i < TSA_SERVER_COUNT; i++) {
-            WCHAR wlabel[256];
+            wchar_t wlabel[256];
             MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].label, -1, wlabel, 256);
             int idx = (int)SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)wlabel);
             SendMessageW(hCombo, CB_SETITEMDATA, (WPARAM)idx, (LPARAM)i);
         }
         SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
-        /* Restore saved values */
-        if (out_params->pfx_path[0]) {
-            MultiByteToWideChar(CP_UTF8, 0, out_params->pfx_path, -1, pfx_buf, MAX_PATH);
-            SetDlgItemTextW(hDlg, 1000, pfx_buf);
-        }
-        if (out_params->pfx_password[0]) {
-            MultiByteToWideChar(CP_UTF8, 0, out_params->pfx_password, -1, pw_buf, 512);
-            SetDlgItemTextW(hDlg, 1001, pw_buf);
-        }
-        if (out_params->tsa_url[0]) {
-            MultiByteToWideChar(CP_UTF8, 0, out_params->tsa_url, -1, tsa_buf, 512);
-            SetDlgItemTextW(hDlg, 1004, tsa_buf);
-        }
-        if (out_params->output_dir[0]) {
-            MultiByteToWideChar(CP_UTF8, 0, out_params->output_dir, -1, outdir_buf, MAX_PATH);
-            SetDlgItemTextW(hDlg, 1005, outdir_buf);
-        }
-        return TRUE;
     }
-    case WM_COMMAND:
-        switch (LOWORD(wParam)) {
-        case IDOK: {
-            /* Read values back */
-            GetDlgItemTextW(hDlg, 1000, pfx_buf, MAX_PATH);
-            GetDlgItemTextW(hDlg, 1001, pw_buf, 512);
-            GetDlgItemTextW(hDlg, 1004, tsa_buf, 512);
-            GetDlgItemTextW(hDlg, 1005, outdir_buf, MAX_PATH);
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u6D4B\u901F",
+              BS_TEXT, W_EDIT - 86, y, 80, EH, IDC_BTN_TEST_TSA);
+    y += EH + 6;
 
-            WideCharToMultiByte(CP_UTF8, 0, pfx_buf, -1,
-                                out_params->pfx_path, MAX_PATH, NULL, NULL);
-            WideCharToMultiByte(CP_UTF8, 0, pw_buf, -1,
-                                out_params->pfx_password, 512, NULL, NULL);
-            WideCharToMultiByte(CP_UTF8, 0, tsa_buf, -1,
-                                out_params->tsa_url, 512, NULL, NULL);
-            WideCharToMultiByte(CP_UTF8, 0, outdir_buf, -1,
-                                out_params->output_dir, MAX_PATH, NULL, NULL);
-            out_params->force = (IsDlgButtonChecked(hDlg, 1006) == BST_CHECKED);
+    make_ctrl(g_hPageSign, L"STATIC",
+              L"\u8F93\u51FA\u76EE\u5F55 (\u53EF\u9009, \u7559\u7A7A = \u8986\u76D6\u539F\u6587\u4EF6):",
+              0, 8, y, edit_x, LH, 0);
+    y += LH + 3;
+    make_edit(g_hPageSign, L"", 0, y, W_EDIT, IDC_EDIT_OUTDIR);
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u6D4F\u89C8...",
+              BS_TEXT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_OUT);
+    y += EH + 8;
 
-            EndDialog(hDlg, IDOK);
-            return TRUE;
-        }
-        case IDCANCEL:
-            EndDialog(hDlg, IDCANCEL);
-            return TRUE;
-        case 1010: { /* Browse PFX */
-            WCHAR file_buf[MAX_PATH] = {0};
-            OPENFILENAMEW ofn;
-            memset(&ofn, 0, sizeof(ofn));
-            ofn.lStructSize  = sizeof(ofn);
-            ofn.hwndOwner    = hDlg;
-            ofn.lpstrFile    = file_buf;
-            ofn.nMaxFile     = MAX_PATH;
-            ofn.lpstrFilter  = L"PFX/P12 Files\0*.pfx;*.p12\0All Files\0*.*\0";
-            ofn.nFilterIndex = 1;
-            ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-            if (GetOpenFileNameW(&ofn))
-                SetDlgItemTextW(hDlg, 1000, file_buf);
-            return TRUE;
-        }
-        case 1011: { /* Browse output dir */
-            BROWSEINFOW bi;
-            memset(&bi, 0, sizeof(bi));
-            bi.hwndOwner = hDlg;
-            bi.lpszTitle = L"Select Output Directory";
-            bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-            if (pidl) {
-                WCHAR path[MAX_PATH];
-                if (SHGetPathFromIDListW(pidl, path))
-                    SetDlgItemTextW(hDlg, 1005, path);
-                CoTaskMemFree(pidl);
-            }
-            return TRUE;
-        }
-        case 1003: { /* TSA combo selection */
-            if (HIWORD(wParam) == CBN_SELCHANGE) {
-                HWND hCombo = GetDlgItem(hDlg, 1003);
-                int sel = (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
-                if (sel >= 0) {
-                    int idx = (int)SendMessageW(hCombo, CB_GETITEMDATA, (WPARAM)sel, 0);
-                    if (idx >= 0 && idx < TSA_SERVER_COUNT) {
-                        WCHAR wurl[512];
-                        MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[idx].url, -1, wurl, 512);
-                        SetDlgItemTextW(hDlg, 1004, wurl);
-                    }
-                }
-            }
-            return TRUE;
-        }
-        }
-        return FALSE;
-    }
-    return FALSE;
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u5305\u542B\u5B50\u76EE\u5F55",
+              BS_AUTOCHECKBOX, 4, y, 200, LH, IDC_CHK_RECURSIVE);
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u5F3A\u5236\u91CD\u65B0\u7B7E\u540D",
+              BS_AUTOCHECKBOX, 220, y, 180, LH, IDC_CHK_FORCE);
+    y += LH + 12;
+
+    make_ctrl(g_hPageSign, L"STATIC", L"", SS_ETCHEDHORZ,
+              0, y, W_CLIENT - 2*PAD, 2, 0);
+    y += 10;
+
+    HWND hBtnSign = make_ctrl(g_hPageSign, L"BUTTON", L"\u5F00\u59CB\u7B7E\u540D",
+                               BS_DEFPUSHBUTTON, 0, y, 130, EH + 4, IDC_BTN_SIGN);
+    SetWindowFont(hBtnSign, g_hFont, TRUE);
+    y += EH + 4 + 10;
+
+    g_hProgress = make_ctrl(g_hPageSign, PROGRESS_CLASSW, L"",
+                             0, 0, y, W_CLIENT - 2*PAD, 24, IDC_PROGRESS);
+    SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
+    SendMessageW(g_hProgress, PBM_SETBARCOLOR, 0, g_clrAccent);
+    SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, g_clrBorder);
+    y += 28;
+
+    make_ctrl(g_hPageSign, L"STATIC", L"  \u65E5\u5FD7\u8F93\u51FA",
+              SS_LEFT, 0, y, 300, LH + 2, IDC_LBL_LOG_TITLE);
+    y += LH + 4;
+
+    g_hLog = make_ctrl(g_hPageSign, L"LISTBOX", L"",
+                        WS_BORDER | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT,
+                        0, y, W_CLIENT - 2*PAD, 200, IDC_LIST_LOG);
+    SendMessageW(g_hLog, LB_SETITEMHEIGHT, 0, 18);
+
+    g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                               DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                               0, L"Consolas");
+    if (!g_hMonoFont)
+        g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                   DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                                   0, L"Segoe UI");
+    SendMessageW(g_hLog, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
 }
 
-static INT_PTR CALLBACK
-cert_gen_dlg(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+/* ---------------------------------------------------------------- */
+/* Certificate page                                                 */
+/* ---------------------------------------------------------------- */
+
+static void
+create_cert_page(HWND parent)
 {
-    (void)lParam;
+    g_hPageCert = CreateWindowExW(0, L"STATIC", L"",
+                                   WS_CHILD,
+                                   PAD, 40, W_CLIENT - 2*PAD, PAGE_H,
+                                   parent, NULL, g_hInst, NULL);
 
-    switch (msg) {
-    case WM_INITDIALOG:
-        SetDlgItemInt(hDlg, 1002, CERT_SIGNER_DEFAULT_DAYS, FALSE);
-        return TRUE;
-    case WM_COMMAND:
-        switch (LOWORD(wParam)) {
-        case IDOK: {
-            WCHAR outdir[MAX_PATH] = {0}, pw[256] = {0};
-            WCHAR cn[256] = {0}, email[256] = {0};
-            GetDlgItemTextW(hDlg, 1000, outdir, MAX_PATH);
-            GetDlgItemTextW(hDlg, 1001, pw, 256);
-            GetDlgItemTextW(hDlg, 1003, cn, 256);
-            GetDlgItemTextW(hDlg, 1004, email, 256);
-            int days = GetDlgItemInt(hDlg, 1002, NULL, FALSE);
+    int y = 8;
 
-            char outdir_a[MAX_PATH], pw_a[256], cn_a[256], email_a[256];
-            WideCharToMultiByte(CP_UTF8, 0, outdir, -1, outdir_a, MAX_PATH, NULL, NULL);
-            WideCharToMultiByte(CP_UTF8, 0, pw, -1, pw_a, 256, NULL, NULL);
-            WideCharToMultiByte(CP_UTF8, 0, cn, -1, cn_a, 256, NULL, NULL);
-            WideCharToMultiByte(CP_UTF8, 0, email, -1, email_a, 256, NULL, NULL);
+    make_ctrl(g_hPageCert, L"STATIC", L"  \u8BC1\u4E66\u751F\u6210",
+              SS_LEFT, 0, y, 300, LH + 2, IDC_LBL_CERT_TITLE);
+    y += LH + 8;
 
-            CreateDirectoryA(outdir_a, NULL);
-            int ok = cert_generate(outdir_a, NULL,
-                                   pw_a[0] ? pw_a : NULL,
-                                   days, cn_a[0] ? cn_a : NULL,
-                                   email_a[0] ? email_a : NULL);
-            WCHAR msg_buf[512];
-            if (ok) {
-                swprintf(msg_buf, 512, L"Certificate generated successfully in:\n%hs", outdir_a);
-                MessageBoxW(hDlg, msg_buf, L"Success", MB_ICONINFORMATION);
-            } else {
-                swprintf(msg_buf, 512, L"Certificate generation failed.\nCheck output directory: %hs", outdir_a);
-                MessageBoxW(hDlg, msg_buf, L"Error", MB_ICONERROR);
-            }
-            EndDialog(hDlg, IDOK);
-            return TRUE;
-        }
-        case IDCANCEL:
-            EndDialog(hDlg, IDCANCEL);
-            return TRUE;
-        case 1010: { /* Browse output dir */
-            BROWSEINFOW bi;
-            memset(&bi, 0, sizeof(bi));
-            bi.hwndOwner = hDlg;
-            bi.lpszTitle = L"Select Output Directory";
-            bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-            if (pidl) {
-                WCHAR path[MAX_PATH];
-                if (SHGetPathFromIDListW(pidl, path))
-                    SetDlgItemTextW(hDlg, 1000, path);
-                CoTaskMemFree(pidl);
-            }
-            return TRUE;
-        }
-        }
-        return FALSE;
-    }
-    return FALSE;
+    make_ctrl(g_hPageCert, L"STATIC",
+              L"\u751F\u6210\u81EA\u7B7E\u540D\u6839 CA + \u4EE3\u7801\u7B7E\u540D\u8BC1\u4E66\u3002\n"
+              L"\u5C06\u6839 CA \u5BFC\u5165 Windows \u53D7\u4FE1\u4EFB\u6839\u5B58\u50A8\u5373\u53EF\u4FE1\u4EFB\u7B7E\u540D\u3002",
+              SS_LEFT, 8, y, W_CLIENT - 2*PAD - 16, 36, 0);
+    y += 44;
+
+    make_ctrl(g_hPageCert, L"STATIC", L"\u8F93\u51FA\u76EE\u5F55:",
+              0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
+    make_ctrl(g_hPageCert, L"EDIT", L"./certs",
+              WS_BORDER | ES_AUTOHSCROLL,
+              0, y, W_EDIT, EH, IDC_EDIT_CERT_DIR);
+    make_ctrl(g_hPageCert, L"BUTTON", L"\u6D4F\u89C8...",
+              BS_TEXT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_CD);
+    y += EH + 8;
+
+    make_ctrl(g_hPageCert, L"STATIC", L"\u7B7E\u540D\u8BC1\u4E66\u6709\u6548\u671F (\u5929):",
+              0, 8, y, 180, LH, 0);
+    y += LH + 3;
+    make_ctrl(g_hPageCert, L"EDIT", L"90",
+              WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+              0, y, 80, EH, IDC_EDIT_CERT_DAYS);
+    y += EH + 8;
+
+    make_ctrl(g_hPageCert, L"STATIC", L"PFX \u5BC6\u7801 (\u7B7E\u540D\u65F6\u9700\u586B\u5199\u6B64\u5BC6\u7801):",
+              0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
+    make_edit(g_hPageCert, L"", 0, y, 280, IDC_EDIT_CERT_PW);
+    y += EH + 8;
+
+    make_ctrl(g_hPageCert, L"STATIC",
+              L"\u7B7E\u540D\u8005\u59D3\u540D (CN, \u53EF\u9009, \u9ED8\u8BA4: FileSigner Code Signing):",
+              0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
+    make_edit(g_hPageCert, L"", 0, y, 280, IDC_EDIT_CERT_CN);
+    y += EH + 8;
+
+    make_ctrl(g_hPageCert, L"STATIC", L"\u7B7E\u540D\u8005\u90AE\u7BB1 (\u53EF\u9009):",
+              0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
+    make_edit(g_hPageCert, L"", 0, y, 280, IDC_EDIT_CERT_EMAIL);
+    y += EH + 10;
+
+    make_ctrl(g_hPageCert, L"STATIC", L"", SS_ETCHEDHORZ,
+              0, y, W_CLIENT - 2*PAD, 2, 0);
+    y += 8;
+
+    make_ctrl(g_hPageCert, L"BUTTON", L"\u751F\u6210\u8BC1\u4E66",
+              BS_DEFPUSHBUTTON, 0, y, 160, EH + 4, IDC_BTN_GENERATE);
+    y += EH + 10;
+
+    make_ctrl(g_hPageCert, L"STATIC", L"",
+              SS_LEFT, 8, y, W_CLIENT - 2*PAD - 16, 140, IDC_LBL_CERT_STATUS);
 }
 
+/* ---------------------------------------------------------------- */
+/* Tab switching                                                    */
+/* ---------------------------------------------------------------- */
+
+static void
+switch_tab(int idx)
+{
+    ShowWindow(g_hPageSign, idx == 0 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hPageCert, idx == 1 ? SW_SHOW : SW_HIDE);
+}
 
 /* ---------------------------------------------------------------- */
 /* Worker thread                                                    */
 /* ---------------------------------------------------------------- */
 
-static DWORD WINAPI
-sign_worker(LPVOID param)
+static void
+post_log_utf8(int color, const char *fmt, ...)
 {
-    SignJob *job = (SignJob *)param;
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    wchar_t wbuf[1024];
+    wide_from_utf8(buf, wbuf, 1024);
+    size_t len = wcslen(wbuf) + 1;
+    wchar_t *copy = malloc(len * sizeof(wchar_t));
+    if (!copy) return;
+    wcscpy(copy, wbuf);
+    if (!PostMessageW(g_hwndMain, WM_APP_LOG, (WPARAM)color, (LPARAM)copy))
+        free(copy);
+}
 
-    for (int i = 0; i < job->count; i++) {
-        PostMessageW(g_hwndMain, WM_GUI_UPDATE_ROW,
-                     MAKEWPARAM(job->lv_rows[i], LV_STATUS_SIGNING), 0);
+static void
+post_progress(int percent)
+{
+    PostMessageW(g_hwndMain, WM_APP_PROGRESS, (WPARAM)percent, 0);
+}
 
-        char pe_path[MAX_PATH];
-        WideCharToMultiByte(CP_UTF8, 0, job->paths[i], -1,
-                            pe_path, MAX_PATH, NULL, NULL);
+static void
+thread_progress_cb(const char *filename, int current, int total,
+                   int success, void *user_data)
+{
+    (void)user_data;
+    if (!filename) return;
+    if (total > 0)
+        post_progress((int)(current * 100 / total));
 
-        char out_path[MAX_PATH] = {0};
-        if (job->params.output_dir[0]) {
-            const char *fname = strrchr(pe_path, '\\');
-            if (!fname) fname = strrchr(pe_path, '/');
-            if (!fname) fname = pe_path;
-            else fname++;
-            snprintf(out_path, sizeof(out_path), "%s\\%s",
-                     job->params.output_dir, fname);
-        }
+    wchar_t wfile[GUI_PATH_LEN];
+    wide_from_utf8(filename, wfile, GUI_PATH_LEN);
 
-        int ok = authenticode_sign(pe_path,
-                                   job->params.pfx_path,
-                                   job->params.pfx_password[0] ? job->params.pfx_password : NULL,
-                                   job->params.tsa_url[0]      ? job->params.tsa_url : NULL,
-                                   out_path[0]                 ? out_path : NULL,
-                                   NULL, NULL);
+    if (success == 1)
+        post_log_utf8(LOG_COLOR_OK, "[OK] %s", filename);
+    else if (success == -2)
+        post_log_utf8(LOG_COLOR_SKIP, "[\u8DF3\u8FC7] %s", filename);
+    else if (success == -3)
+        post_log_utf8(LOG_COLOR_INFO, "%s", filename);
+    else if (success == -4)
+        post_log_utf8(LOG_COLOR_INFO, "  %s", filename);
+    else if (success == 0)
+        post_log_utf8(LOG_COLOR_FAIL, "[\u5931\u8D25] %s", filename);
+}
 
-        int status = ok ? LV_STATUS_OK : LV_STATUS_FAIL;
-        PostMessageW(g_hwndMain, WM_GUI_UPDATE_ROW,
-                     MAKEWPARAM(job->lv_rows[i], status), 0);
-    }
+static DWORD WINAPI
+sign_thread_proc(LPVOID param)
+{
+    SignTask *task = (SignTask *)param;
+    if (!task) return 0;
 
-    PostMessageW(g_hwndMain, WM_GUI_SIGN_DONE, 0, (LPARAM)job);
+    HWND hwnd = task->hwnd;
+    int count = batch_sign(task->target, task->pfx,
+                           task->password[0] ? task->password : NULL,
+                           task->ts_url[0]   ? task->ts_url : NULL,
+                           task->outdir[0]   ? task->outdir : NULL,
+                           task->force, task->recursive,
+                           thread_progress_cb, task);
+
+    wchar_t wtarget[GUI_PATH_LEN];
+    wide_from_utf8(task->target, wtarget, GUI_PATH_LEN);
+
+    post_log_utf8(LOG_COLOR_INFO, "\u5B8C\u6210 - \u5DF2\u7B7E\u540D %d \u4E2A\u6587\u4EF6", count);
+    PostMessageW(hwnd, WM_APP_SIGN_DONE, (WPARAM)count, 0);
     return 0;
 }
 
-
 /* ---------------------------------------------------------------- */
-/* Signing orchestration                                            */
+/* WndProc                                                          */
 /* ---------------------------------------------------------------- */
 
-static void
-start_signing(void)
+static LRESULT CALLBACK
+page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+              UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
-    if (g_signing) return;
-
-    /* Count pending items */
-    int total = ListView_GetItemCount(g_hwndLV);
-    if (total == 0) {
-        MessageBoxW(g_hwndMain, L"No files in list.\nAdd files first.", L"FileSigner",
-                    MB_ICONINFORMATION);
-        return;
-    }
-
-    int pending = 0;
-    for (int i = 0; i < total; i++) {
-        WCHAR buf[32];
-        ListView_GetItemText(g_hwndLV, i, LV_COL_STATUS, buf, 32);
-        if (wcscmp(buf, L"Pending") == 0) pending++;
-    }
-    if (pending == 0) {
-        MessageBoxW(g_hwndMain, L"All files have been signed.\nUse Clear List to reset.",
-                    L"FileSigner", MB_ICONINFORMATION);
-        return;
-    }
-
-    /* Show sign settings dialog */
-    SignJobParams params;
-    memset(&params, 0, sizeof(params));
-    INT_PTR dlg_ret = DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(101),
-                                       g_hwndMain, sign_settings_dlg, (LPARAM)&params);
-    if (dlg_ret != IDOK) return;
-
-    if (!params.pfx_path[0]) {
-        MessageBoxW(g_hwndMain, L"PFX file is required.", L"FileSigner", MB_ICONWARNING);
-        return;
-    }
-
-    /* Collect pending files for the worker */
-    int *lv_rows = (int *)malloc((size_t)pending * sizeof(int));
-    WCHAR **paths = (WCHAR **)malloc((size_t)pending * sizeof(WCHAR *));
-    if (!lv_rows || !paths) { free(lv_rows); free(paths); return; }
-
-    int idx = 0;
-    for (int i = 0; i < total && idx < pending; i++) {
-        WCHAR buf[32];
-        ListView_GetItemText(g_hwndLV, i, LV_COL_STATUS, buf, 32);
-        if (wcscmp(buf, L"Pending") == 0) {
-            lv_rows[idx] = i;
-            paths[idx] = lv_get_path(g_hwndLV, i);
-            idx++;
-        }
-    }
-
-    SignJob *job = (SignJob *)malloc(sizeof(SignJob));
-    if (!job) { free(lv_rows); free(paths); return; }
-    job->count     = pending;
-    job->lv_rows   = lv_rows;
-    job->paths     = paths;
-    job->params    = params;
-
-    g_signing = 1;
-    SendMessageW(g_hwndTB, TB_ENABLEBUTTON, ID_TB_START_SIGN, MAKELPARAM(FALSE, 0));
-    update_status_bar();
-
-    HANDLE h = CreateThread(NULL, 0, sign_worker, job, 0, NULL);
-    if (h) CloseHandle(h);
-    else { g_signing = 0; free(job->lv_rows); free(job->paths); free(job); }
+    (void)uIdSubclass; (void)dwRefData;
+    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORLISTBOX)
+        return SendMessageW(GetParent(hwnd), msg, wp, lp);
+    return DefSubclassProc(hwnd, msg, wp, lp);
 }
-
-static void
-on_sign_done(SignJob *job)
-{
-    /* Free worker data */
-    for (int i = 0; i < job->count; i++)
-        free(job->paths[i]);
-    free(job->lv_rows);
-    free(job->paths);
-    free(job);
-
-    g_signing = 0;
-    SendMessageW(g_hwndTB, TB_ENABLEBUTTON, ID_TB_START_SIGN, MAKELPARAM(TRUE, 0));
-    update_status_bar();
-
-    /* Count results */
-    int ok = 0, fail = 0;
-    int total = ListView_GetItemCount(g_hwndLV);
-    for (int i = 0; i < total; i++) {
-        WCHAR buf[32];
-        ListView_GetItemText(g_hwndLV, i, LV_COL_STATUS, buf, 32);
-        if (wcscmp(buf, L"Signed") == 0) ok++;
-        else if (wcscmp(buf, L"Failed") == 0) fail++;
-    }
-
-    WCHAR msg[256];
-    swprintf(msg, 256, L"Signing complete.\n\nSigned: %d\nFailed: %d\nTotal:  %d",
-             ok, fail, total);
-    MessageBoxW(g_hwndMain, msg, L"FileSigner", MB_ICONINFORMATION);
-}
-
-
-/* ---------------------------------------------------------------- */
-/* Add files / folders                                              */
-/* ---------------------------------------------------------------- */
-
-static void
-add_files(void)
-{
-    WCHAR files[65536] = {0};
-    OPENFILENAMEW ofn;
-    memset(&ofn, 0, sizeof(ofn));
-    ofn.lStructSize  = sizeof(ofn);
-    ofn.hwndOwner    = g_hwndMain;
-    ofn.lpstrFile    = files;
-    ofn.nMaxFile     = 65536;
-    ofn.lpstrFilter  = L"PE Files (*.exe;*.dll;*.ocx;*.sys)\0*.exe;*.dll;*.ocx;*.sys\0All Files\0*.*\0";
-    ofn.nFilterIndex = 1;
-    ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST |
-                        OFN_HIDEREADONLY | OFN_ALLOWMULTISELECT |
-                        OFN_EXPLORER;
-
-    if (!GetOpenFileNameW(&ofn)) return;
-
-    /* Multi-select: first token is dir, followed by filenames */
-    WCHAR *p = files;
-    WCHAR dir[MAX_PATH];
-    wcscpy(dir, p);
-    p += wcslen(p) + 1;
-
-    if (*p == 0) {
-        /* Only one file selected */
-        lv_add_item(g_hwndLV, dir);
-    } else {
-        /* Multiple files */
-        while (*p) {
-            WCHAR full[MAX_PATH];
-            swprintf(full, MAX_PATH, L"%s\\%s", dir, p);
-            lv_add_item(g_hwndLV, full);
-            p += wcslen(p) + 1;
-        }
-    }
-    update_status_bar();
-}
-
-static void
-add_folder(void)
-{
-    BROWSEINFOW bi;
-    memset(&bi, 0, sizeof(bi));
-    bi.hwndOwner = g_hwndMain;
-    bi.lpszTitle = L"Select folder with PE files to sign";
-    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return;
-
-    WCHAR dir[MAX_PATH];
-    if (!SHGetPathFromIDListW(pidl, dir)) { CoTaskMemFree(pidl); return; }
-    CoTaskMemFree(pidl);
-
-    WCHAR pattern[MAX_PATH];
-    swprintf(pattern, MAX_PATH, L"%s\\*", dir);
-
-    WIN32_FIND_DATAW ffd;
-    HANDLE hFind = FindFirstFileW(pattern, &ffd);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        MessageBoxW(g_hwndMain, L"Could not open folder.", L"FileSigner", MB_ICONWARNING);
-        return;
-    }
-
-    int added = 0;
-    do {
-        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        /* Check for PE extension */
-        const WCHAR *ext = wcsrchr(ffd.cFileName, L'.');
-        if (!ext) continue;
-        if (_wcsicmp(ext, L".exe") == 0 || _wcsicmp(ext, L".dll") == 0 ||
-            _wcsicmp(ext, L".ocx") == 0 || _wcsicmp(ext, L".sys") == 0) {
-            WCHAR full[MAX_PATH];
-            swprintf(full, MAX_PATH, L"%s\\%s", dir, ffd.cFileName);
-            lv_add_item(g_hwndLV, full);
-            added++;
-        }
-    } while (FindNextFileW(hFind, &ffd) != 0);
-
-    FindClose(hFind);
-
-    if (added == 0)
-        MessageBoxW(g_hwndMain, L"No PE files (*.exe, *.dll, *.ocx, *.sys) found.",
-                    L"FileSigner", MB_ICONINFORMATION);
-
-    update_status_bar();
-}
-
-
-/* ---------------------------------------------------------------- */
-/* Toolbar                                                          */
-/* ---------------------------------------------------------------- */
-
-static HWND
-create_toolbar(HWND hwndParent)
-{
-    HWND hwnd = CreateWindowExW(0, TOOLBARCLASSNAME, NULL,
-                                 WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT |
-                                 TBSTYLE_TOOLTIPS | CCS_NORESIZE,
-                                 0, 0, 0, 0, hwndParent, NULL, g_hInst, NULL);
-    if (!hwnd) return NULL;
-
-    SendMessageW(hwnd, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
-    SendMessageW(hwnd, TB_SETMAXTEXTROWS, 0, 0);
-
-    TBBUTTON btns[] = {
-        { 0, ID_TB_ADD_FILES,  TBSTATE_ENABLED, BTNS_AUTOSIZE | BTNS_SHOWTEXT },
-        { 0, ID_TB_ADD_FOLDER, TBSTATE_ENABLED, BTNS_AUTOSIZE | BTNS_SHOWTEXT },
-        { 0, 0,                TBSTATE_ENABLED, BTNS_SEP },
-        { 0, ID_TB_START_SIGN, TBSTATE_ENABLED, BTNS_AUTOSIZE | BTNS_SHOWTEXT },
-    };
-    SendMessageW(hwnd, TB_ADDBUTTONS, (WPARAM)ARRAYSIZE(btns), (LPARAM)btns);
-
-    TBBUTTONINFOW bi;
-    memset(&bi, 0, sizeof(bi));
-    bi.cbSize  = sizeof(bi);
-    bi.dwMask  = TBIF_TEXT;
-
-    bi.pszText = L"Add Files";
-    SendMessageW(hwnd, TB_SETBUTTONINFOW, ID_TB_ADD_FILES, (LPARAM)&bi);
-    bi.pszText = L"Add Folder";
-    SendMessageW(hwnd, TB_SETBUTTONINFOW, ID_TB_ADD_FOLDER, (LPARAM)&bi);
-    bi.pszText = L"Start Sign";
-    SendMessageW(hwnd, TB_SETBUTTONINFOW, ID_TB_START_SIGN, (LPARAM)&bi);
-
-    return hwnd;
-}
-
-
-/* ---------------------------------------------------------------- */
-/* ListView                                                         */
-/* ---------------------------------------------------------------- */
-
-static HWND
-create_listview(HWND hwndParent)
-{
-    HWND hwnd = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL,
-                                 WS_CHILD | WS_VISIBLE | LVS_REPORT |
-                                 LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                                 0, 0, 0, 0, hwndParent, NULL, g_hInst, NULL);
-    if (!hwnd) return NULL;
-
-    ListView_SetExtendedListViewStyleEx(hwnd,
-        LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER,
-        LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
-
-    LVCOLUMNW lvc;
-    memset(&lvc, 0, sizeof(lvc));
-    lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
-    lvc.fmt  = LVCFMT_LEFT;
-
-    lvc.cx       = 320;
-    lvc.pszText  = L"File Name";
-    ListView_InsertColumn(hwnd, LV_COL_FILE, &lvc);
-
-    lvc.cx       = 100;
-    lvc.pszText  = L"Status";
-    ListView_InsertColumn(hwnd, LV_COL_STATUS, &lvc);
-
-    lvc.cx       = 200;
-    lvc.pszText  = L"TSA URL";
-    ListView_InsertColumn(hwnd, LV_COL_TSA, &lvc);
-
-    lvc.cx       = 200;
-    lvc.pszText  = L"Result";
-    ListView_InsertColumn(hwnd, LV_COL_RESULT, &lvc);
-
-    return hwnd;
-}
-
-
-/* ---------------------------------------------------------------- */
-/* Menu creation                                                    */
-/* ---------------------------------------------------------------- */
-
-static HMENU
-create_menu_bar(void)
-{
-    HMENU hMenu = CreateMenu();
-    HMENU hFile = CreatePopupMenu();
-    HMENU hAction = CreatePopupMenu();
-    HMENU hSettings = CreatePopupMenu();
-    HMENU hHelp = CreatePopupMenu();
-
-    AppendMenuW(hFile, MF_STRING, ID_FILE_ADD_FILES,  L"Add Files...\tCtrl+A");
-    AppendMenuW(hFile, MF_STRING, ID_FILE_ADD_FOLDER, L"Add Folder...\tCtrl+F");
-    AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hFile, MF_STRING, ID_FILE_EXIT,       L"Exit\tAlt+F4");
-
-    AppendMenuW(hAction, MF_STRING, ID_ACTION_START,  L"Start Sign\tF5");
-    AppendMenuW(hAction, MF_STRING, ID_ACTION_CLEAR,  L"Clear List");
-
-    AppendMenuW(hSettings, MF_STRING, ID_SETTINGS_TSA, L"TSA Servers...");
-    AppendMenuW(hSettings, MF_STRING, ID_CERT_GEN,     L"Generate Certificate...");
-
-    AppendMenuW(hHelp, MF_STRING, ID_HELP_ABOUT,      L"About FileSigner");
-
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile,     L"File");
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hAction,   L"Action");
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSettings, L"Settings");
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hHelp,     L"Help");
-
-    return hMenu;
-}
-
-
-/* ---------------------------------------------------------------- */
-/* Main window procedure                                            */
-/* ---------------------------------------------------------------- */
 
 static LRESULT CALLBACK
 WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
-    case WM_CREATE: {
-        /* Create controls */
-        g_hwndTB = create_toolbar(hwnd);
-        g_hwndLV = create_listview(hwnd);
-        g_hwndStatus = CreateWindowExW(0, STATUSCLASSNAMEW, NULL,
-                                        WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
-                                        0, 0, 0, 0, hwnd, NULL, g_hInst, NULL);
-
-        /* Accept drag-and-drop */
-        DragAcceptFiles(hwnd, TRUE);
-
-        /* Initial status */
-        update_status_bar();
-
-    return 0;
+    case WM_APP_LOG: {
+        wchar_t *wmsg = (wchar_t *)lParam;
+        if (wmsg) {
+            int idx = (int)SendMessageW(g_hLog, LB_ADDSTRING, 0, (LPARAM)wmsg);
+            SendMessageW(g_hLog, LB_SETITEMDATA, (WPARAM)idx, wParam);
+            SendMessageW(g_hLog, LB_SETTOPINDEX, idx, 0);
+            free(wmsg);
+        }
+        return 0;
     }
-    case WM_SIZE: {
+    case WM_APP_PROGRESS:
+        SendMessageW(g_hProgress, PBM_SETPOS, wParam, 0);
+        return 0;
+    case WM_APP_SIGN_DONE: {
+        if (g_hThread) {
+            WaitForSingleObject(g_hThread, INFINITE);
+            CloseHandle(g_hThread);
+            g_hThread = NULL;
+        }
+        EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), TRUE);
+        return 0;
+    }
+    case WM_CREATE: {
+        InitCommonControls();
+        g_hbrBg     = CreateSolidBrush(g_clrBg);
+        g_hbrLogBg  = CreateSolidBrush(g_clrLogBg);
+        g_hbrEditBg = CreateSolidBrush(g_clrEditBg);
+        g_hbrAccent = CreateSolidBrush(g_clrAccent);
+        g_hbrBtnFace = GetSysColorBrush(COLOR_BTNFACE);
+
+        g_hFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                               DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                               0, L"Segoe UI");
+        g_hFontSection = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+                                     DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                                     0, L"Segoe UI");
+
+        g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FLATBUTTONS,
+                                  0, 0, W_CLIENT, 38,
+                                  hwnd, (HMENU)IDC_TAB, g_hInst, NULL);
+        SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        TCITEMW tie;
+        tie.mask = TCIF_TEXT;
+        tie.pszText = L"  \u7B7E\u540D  ";
+        SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&tie);
+        tie.pszText = L"  \u751F\u6210\u8BC1\u4E66  ";
+        SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&tie);
+
+        create_sign_page(hwnd);
+        create_cert_page(hwnd);
+        apply_font(g_hPageSign);
+        apply_font(g_hPageCert);
+        SetWindowSubclass(g_hPageSign, page_subclass, 0, 0);
+        SetWindowSubclass(g_hPageCert, page_subclass, 0, 0);
+        switch_tab(0);
+
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        HWND hCtrl = (HWND)lParam;
+        if (hCtrl == g_hPageSign || hCtrl == g_hPageCert) {
+            SetTextColor(hdc, g_clrText);
+            SetBkColor(hdc, g_clrEditBg);
+            return (LRESULT)g_hbrEditBg;
+        }
+        if (hCtrl == g_hLog) {
+            SetTextColor(hdc, g_clrLogText);
+            SetBkColor(hdc, g_clrLogBg);
+            return (LRESULT)g_hbrLogBg;
+        }
+        int id = GetDlgCtrlID(hCtrl);
+        HWND hParent = GetParent(hCtrl);
+        if (hParent == g_hPageSign || hParent == g_hPageCert) {
+            if (id == IDC_LBL_LOG_TITLE || id == IDC_LBL_CERT_TITLE) {
+                SetTextColor(hdc, g_clrAccent);
+                SetBkColor(hdc, g_clrEditBg);
+                SelectObject(hdc, g_hFontSection);
+                return (LRESULT)g_hbrEditBg;
+            }
+            SetTextColor(hdc, g_clrText);
+            SetBkColor(hdc, g_clrEditBg);
+            return (LRESULT)g_hbrEditBg;
+        }
+        SetTextColor(hdc, g_clrText);
+        SetBkColor(hdc, g_clrBg);
+        return (LRESULT)g_hbrBg;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = (HDC)wParam;
+        SetBkColor(hdc, g_clrEditBg);
+        return (LRESULT)g_hbrEditBg;
+    }
+    case WM_CTLCOLORBTN: {
+        HDC hdc = (HDC)wParam;
+        HWND hCtrl = (HWND)lParam;
+        int id = GetDlgCtrlID(hCtrl);
+        if (id == IDC_BTN_SIGN || id == IDC_BTN_GENERATE) {
+            SetTextColor(hdc, RGB(255, 255, 255));
+            SetBkColor(hdc, g_clrAccent);
+            return (LRESULT)g_hbrAccent;
+        }
+        SetTextColor(hdc, g_clrText);
+        SetBkColor(hdc, g_clrBg);
+        return (LRESULT)g_hbrBg;
+    }
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, g_clrLogText);
+        SetBkColor(hdc, g_clrLogBg);
+        return (LRESULT)g_hbrLogBg;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
-
-        /* Size toolbar */
-        SendMessageW(g_hwndTB, TB_AUTOSIZE, 0, 0);
-        RECT rcTB;
-        GetWindowRect(g_hwndTB, &rcTB);
-        int tb_h = rcTB.bottom - rcTB.top;
-
-        /* Size status bar */
-        SendMessageW(g_hwndStatus, WM_SIZE, 0, 0);
-        RECT rcSB;
-        GetWindowRect(g_hwndStatus, &rcSB);
-        int sb_h = rcSB.bottom - rcSB.top;
-
-        /* Size ListView to fill remaining space */
-        MoveWindow(g_hwndLV, 0, tb_h,
-                   rc.right, rc.bottom - tb_h - sb_h, TRUE);
+        FillRect(hdc, &rc, g_hbrBg);
+        RECT hdr = { 0, 0, rc.right, 3 };
+        HBRUSH hbrHdr = CreateSolidBrush(g_clrAccent);
+        FillRect(hdc, &hdr, hbrHdr);
+        DeleteObject(hbrHdr);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wParam, &rc, g_hbrBg);
+        return 1;
+    }
+    case WM_MEASUREITEM: {
+        MEASUREITEMSTRUCT *mis = (MEASUREITEMSTRUCT *)lParam;
+        if (mis->CtlType == ODT_LISTBOX) {
+            mis->itemHeight = 18;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lParam;
+        if (dis->CtlType == ODT_LISTBOX && dis->itemID != (UINT)-1) {
+            wchar_t buf[2048];
+            buf[0] = L'\0';
+            SendMessageW(dis->hwndItem, LB_GETTEXT, (WPARAM)dis->itemID, (LPARAM)buf);
+            COLORREF color = g_log_colors[0];
+            LRESULT data = SendMessageW(dis->hwndItem, LB_GETITEMDATA, (WPARAM)dis->itemID, 0);
+            if (data != LB_ERR && data >= 0 && data < (LRESULT)(sizeof(g_log_colors)/sizeof(g_log_colors[0])))
+                color = g_log_colors[data];
+            SetBkColor(dis->hDC, g_clrLogBg);
+            SetTextColor(dis->hDC, color);
+            ExtTextOutW(dis->hDC, dis->rcItem.left + 4, dis->rcItem.top + 1,
+                        ETO_OPAQUE | ETO_CLIPPED, &dis->rcItem, buf, (UINT)wcslen(buf), NULL);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    case WM_NOTIFY: {
+        NMHDR *nmh = (NMHDR *)lParam;
+        if (nmh->idFrom == IDC_TAB && nmh->code == TCN_SELCHANGE) {
+            switch_tab(TabCtrl_GetCurSel(g_hTab));
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        if (nmh->idFrom == IDC_TAB && nmh->code == NM_CUSTOMDRAW) {
+            NMTTCUSTOMDRAW *nmc = (NMTTCUSTOMDRAW *)lParam;
+            if (nmc->nmcd.dwDrawStage == CDDS_PREPAINT)
+                return CDRF_NOTIFYITEMDRAW;
+            if (nmc->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                int sel = TabCtrl_GetCurSel(g_hTab);
+                BOOL isSel = ((int)nmc->nmcd.dwItemSpec == sel);
+                RECT rc = nmc->nmcd.rc;
+                COLORREF bg = isSel ? g_clrEditBg : RGB(234, 235, 240);
+                HBRUSH hbr = CreateSolidBrush(bg);
+                FillRect(nmc->nmcd.hdc, &rc, hbr);
+                DeleteObject(hbr);
+                if (isSel) {
+                    RECT bar = { rc.left + 8, rc.bottom - 3, rc.right - 8, rc.bottom };
+                    HBRUSH hbrBar = CreateSolidBrush(g_clrAccent);
+                    FillRect(nmc->nmcd.hdc, &bar, hbrBar);
+                    DeleteObject(hbrBar);
+                }
+                TCITEMW tci;
+                memset(&tci, 0, sizeof(tci));
+                tci.mask = TCIF_TEXT;
+                wchar_t tabText[64] = {0};
+                tci.pszText = tabText;
+                tci.cchTextMax = 64;
+                SendMessageW(g_hTab, TCM_GETITEMW, nmc->nmcd.dwItemSpec, (LPARAM)&tci);
+                SetBkMode(nmc->nmcd.hdc, TRANSPARENT);
+                SetTextColor(nmc->nmcd.hdc, isSel ? g_clrAccent : g_clrLabel);
+                SelectObject(nmc->nmcd.hdc, g_hFont);
+                DrawTextW(nmc->nmcd.hdc, tabText, -1, &rc,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return CDRF_SKIPDEFAULT;
+            }
+        }
         return 0;
     }
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        switch (id) {
-        case ID_TB_ADD_FILES:
-        case ID_FILE_ADD_FILES:  add_files(); return 0;
-        case ID_TB_ADD_FOLDER:
-        case ID_FILE_ADD_FOLDER: add_folder(); return 0;
-        case ID_FILE_EXIT:       PostQuitMessage(0); return 0;
-        case ID_TB_START_SIGN:
-        case ID_ACTION_START:    start_signing(); return 0;
-        case ID_ACTION_CLEAR:
-            if (g_signing) {
-                MessageBoxW(hwnd, L"Cannot clear list while signing.",
-                            L"FileSigner", MB_ICONWARNING);
+
+        if (id == IDC_BTN_BROWSE_TGT) {
+            wchar_t path[GUI_PATH_LEN] = {0};
+            BROWSEINFOW bi = {0};
+            bi.hwndOwner = hwnd;
+            bi.lpszTitle = L"\u9009\u62E9\u76EE\u6807\u76EE\u5F55";
+            bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+            if (pidl) {
+                if (SHGetPathFromIDListW(pidl, path))
+                    SetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, path);
+                CoTaskMemFree(pidl);
+            }
+        }
+        else if (id == IDC_BTN_BROWSE_PFX) {
+            wchar_t path[GUI_PATH_LEN] = {0};
+            OPENFILENAMEW ofn = {0};
+            ofn.lStructSize  = sizeof(ofn);
+            ofn.hwndOwner    = hwnd;
+            ofn.lpstrFile    = path;
+            ofn.nMaxFile     = GUI_PATH_LEN;
+            ofn.lpstrFilter  = L"PFX/P12 Files\0*.pfx;*.p12\0All Files\0*.*\0";
+            ofn.nFilterIndex = 1;
+            ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+            if (GetOpenFileNameW(&ofn))
+                SetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, path);
+        }
+        else if (id == IDC_BTN_BROWSE_OUT) {
+            wchar_t path[GUI_PATH_LEN] = {0};
+            BROWSEINFOW bi = {0};
+            bi.hwndOwner = hwnd;
+            bi.lpszTitle = L"\u9009\u62E9\u8F93\u51FA\u76EE\u5F55";
+            bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+            if (pidl) {
+                if (SHGetPathFromIDListW(pidl, path))
+                    SetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, path);
+                CoTaskMemFree(pidl);
+            }
+        }
+        else if (id == IDC_BTN_SIGN) {
+            wchar_t wtarget[GUI_PATH_LEN], wpfx[GUI_PATH_LEN], wpassword[256];
+            wchar_t wts_url[512], woutdir[GUI_PATH_LEN];
+
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, wtarget, GUI_PATH_LEN);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX,    wpfx,    GUI_PATH_LEN);
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PASSWORD, wpassword, 256);
+            {
+                HWND hC = GetDlgItem(g_hPageSign, IDC_COMBO_TSA);
+                int sel = (int)SendMessageW(hC, CB_GETCURSEL, 0, 0);
+                if (sel >= 0) {
+                    int si = (int)SendMessageW(hC, CB_GETITEMDATA, (WPARAM)sel, 0);
+                    if (si >= 0 && si < TSA_SERVER_COUNT) {
+                        MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[si].url, -1, wts_url, 512);
+                    } else {
+                        GetDlgItemTextW(g_hPageSign, IDC_COMBO_TSA, wts_url, 512);
+                    }
+                } else {
+                    GetDlgItemTextW(g_hPageSign, IDC_COMBO_TSA, wts_url, 512);
+                }
+            }
+            GetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, woutdir, GUI_PATH_LEN);
+
+            if (wcslen(wtarget) == 0 || wcslen(wpfx) == 0) {
+                MessageBoxW(hwnd, L"\u8BF7\u586B\u5199\u76EE\u6807\u548C PFX \u6587\u4EF6\u3002",
+                            L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+                break;
+            }
+
+            if (g_hThread) {
+                MessageBoxW(hwnd, L"\u7B7E\u540D\u64CD\u4F5C\u6B63\u5728\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u7B49\u5F85\u5B8C\u6210\u3002",
+                            L"\u63D0\u793A", MB_OK | MB_ICONINFORMATION);
+                break;
+            }
+
+            int recursive = IsDlgButtonChecked(g_hPageSign, IDC_CHK_RECURSIVE) == BST_CHECKED;
+            int force     = IsDlgButtonChecked(g_hPageSign, IDC_CHK_FORCE) == BST_CHECKED;
+
+            SignTask *task = calloc(1, sizeof(SignTask));
+            if (!task) break;
+            task->hwnd = hwnd;
+            wide_to_utf8(wtarget,   task->target,   GUI_PATH_LEN);
+            wide_to_utf8(wpfx,      task->pfx,      GUI_PATH_LEN);
+            wide_to_utf8(wpassword, task->password, 256);
+            wide_to_utf8(wts_url,   task->ts_url,   512);
+            wide_to_utf8(woutdir,   task->outdir,    GUI_PATH_LEN);
+            task->recursive = recursive;
+            task->force     = force;
+
+            EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), FALSE);
+            SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
+            SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
+            log_message(LOG_COLOR_INFO, L"\u5F00\u59CB\u7B7E\u540D...");
+
+            g_hThread = CreateThread(NULL, 0, sign_thread_proc, task, 0, NULL);
+            if (!g_hThread) {
+                free(task);
+                EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), TRUE);
+                MessageBoxW(hwnd, L"\u65E0\u6CD5\u521B\u5EFA\u7B7E\u540D\u7EBF\u7A0B\u3002",
+                            L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+            }
+        }
+        else if (id == IDC_BTN_TEST_TSA) {
+            EnableWindow(GetDlgItem(hwnd, IDC_BTN_TEST_TSA), FALSE);
+            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"\u6D4B\u8BD5\u4E2D...");
+
+            int latency = 0;
+            int best = timestamp_find_fastest(&latency);
+
+            if (best >= 0) {
+                HWND hCombo = GetDlgItem(g_hPageSign, IDC_COMBO_TSA);
+                SendMessageW(hCombo, CB_SETCURSEL, best, 0);
+                wchar_t msg[128];
+                swprintf(msg, 128, L"\u6700\u5FEB: %S (%d ms)",
+                         g_tsa_servers[best].label, latency);
+                MessageBoxW(hwnd, msg, L"\u6D4B\u901F\u5B8C\u6210", MB_OK | MB_ICONINFORMATION);
             } else {
-                lv_clear_all(g_hwndLV);
-                update_status_bar();
+                MessageBoxW(hwnd, L"\u6240\u6709\u65F6\u95F4\u6233\u670D\u52A1\u5668\u5747\u4E0D\u53EF\u8FBE\u3002\n\u8BF7\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5\u3002",
+                            L"\u6D4B\u901F\u5931\u8D25", MB_OK | MB_ICONERROR);
             }
-            return 0;
-        case ID_SETTINGS_TSA: {
-            WCHAR msg[2048] = L"Built-in TSA Servers:\r\n\r\n";
-            for (int i = 0; i < TSA_SERVER_COUNT; i++) {
-                WCHAR entry[256];
-                MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].label, -1, entry, 256);
-                wcscat(msg, L"  \u2022 ");
-                wcscat(msg, entry);
-                wcscat(msg, L"\r\n");
+
+            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"\u6D4B\u901F");
+            EnableWindow(GetDlgItem(hwnd, IDC_BTN_TEST_TSA), TRUE);
+        }
+        else if (id == IDC_BTN_BROWSE_CD) {
+            wchar_t path[GUI_PATH_LEN] = {0};
+            BROWSEINFOW bi = {0};
+            bi.hwndOwner = hwnd;
+            bi.lpszTitle = L"\u9009\u62E9\u8F93\u51FA\u76EE\u5F55";
+            bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+            if (pidl) {
+                if (SHGetPathFromIDListW(pidl, path))
+                    SetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, path);
+                CoTaskMemFree(pidl);
             }
-            wcscat(msg, L"\r\nSelect a TSA server in Start Sign \u2192 Sign Settings.");
-            MessageBoxW(hwnd, msg, L"TSA Servers", MB_ICONINFORMATION);
-            return 0;
         }
-        case ID_CERT_GEN:
-            DialogBoxW(g_hInst, MAKEINTRESOURCEW(103), hwnd, cert_gen_dlg);
-            return 0;
-        case ID_HELP_ABOUT:
-            MessageBoxW(hwnd,
-                L"FileSigner 2.0\n\n"
-                L"Authenticode PE Signing Tool\n"
-                L"Built with OpenSSL + native Win32\n\n"
-                L"Batch sign PE files (EXE/DLL/OCX/SYS)\n"
-                L"with code signing certificates.",
-                L"About FileSigner", MB_ICONINFORMATION);
-            return 0;
+        else if (id == IDC_BTN_GENERATE) {
+            wchar_t wdir[GUI_PATH_LEN], wdays_str[16], wpw[256];
+            wchar_t wcn[256], wemail[256];
+
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR,   wdir,  GUI_PATH_LEN);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DAYS,  wdays_str, 16);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_PW,    wpw,   256);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_CN,    wcn,   256);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_EMAIL, wemail, 256);
+
+            if (wcslen(wdir) == 0) {
+                MessageBoxW(hwnd, L"\u8BF7\u9009\u62E9\u8F93\u51FA\u76EE\u5F55\u3002",
+                            L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+                break;
+            }
+
+            int days = _wtoi(wdays_str);
+            if (days <= 0) days = CERT_SIGNER_DEFAULT_DAYS;
+
+            char dir[GUI_PATH_LEN], pw[256], cn[256], email[256];
+            wide_to_utf8(wdir,   dir,   GUI_PATH_LEN);
+            wide_to_utf8(wpw,    pw,    256);
+            wide_to_utf8(wcn,    cn,    256);
+            wide_to_utf8(wemail, email, 256);
+
+            CreateDirectoryA(dir, NULL);
+
+            EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), FALSE);
+            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
+                            L"\u6B63\u5728\u751F\u6210...");
+
+            int ok = cert_generate(dir, NULL,
+                                   pw[0] ? pw : NULL,
+                                   days,
+                                   cn[0]  ? cn  : NULL,
+                                   email[0] ? email : NULL);
+
+            if (ok) {
+                wchar_t msg[512];
+                swprintf(msg, 512,
+                         L"\u8BC1\u4E66\u751F\u6210\u6210\u529F!\n\n"
+                         L"\u751F\u6210\u6587\u4EF6\u4F4D\u4E8E: %s\n\n"
+                         L"%s"
+                         L"\u8BF7\u5C06 FileSigner_RootCA.cer \u5BFC\u5165\n"
+                         L"Windows \u53D7\u4FE1\u4EFB\u7684\u6839\u8BC1\u4E66\u9881\u53D1\u673A\u6784",
+                         wdir,
+                         wpw[0] ? L"PFX \u5BC6\u7801\u5DF2\u8BBE\u7F6E\uFF0C\u7B7E\u540D\u65F6\u8BF7\u4F7F\u7528\u76F8\u540C\u5BC6\u7801\u3002\n\n"
+                                 : L"PFX \u65E0\u5BC6\u7801\uFF0C\u7B7E\u540D\u65F6\u5BC6\u7801\u7559\u7A7A\u5373\u53EF\u3002\n\n");
+                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, msg);
+                MessageBoxW(hwnd, msg, L"\u6210\u529F", MB_OK | MB_ICONINFORMATION);
+            } else {
+                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
+                                L"\u751F\u6210\u5931\u8D25! \u8BF7\u68C0\u67E5\u8F93\u51FA\u76EE\u5F55\u548C\u53C2\u6570\u3002");
+                MessageBoxW(hwnd, L"\u8BC1\u4E66\u751F\u6210\u5931\u8D25\u3002",
+                            L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+            }
+
+            EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), TRUE);
         }
+
         return 0;
     }
-    case WM_GUI_UPDATE_ROW: {
-        int row  = LOWORD(wParam);
-        int status = HIWORD(wParam);
-        lv_update_status(g_hwndLV, row, status);
-        update_status_bar();
-        return 0;
-    }
-    case WM_GUI_SIGN_DONE: {
-        on_sign_done((SignJob *)lParam);
-        return 0;
-    }
-    case WM_DROPFILES: {
-        HDROP hDrop = (HDROP)wParam;
-        UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
-        for (UINT i = 0; i < count; i++) {
-            WCHAR path[MAX_PATH];
-            DragQueryFileW(hDrop, i, path, MAX_PATH);
-            lv_add_item(g_hwndLV, path);
+    case WM_CLOSE: {
+        if (g_hThread) {
+            if (IDYES != MessageBoxW(hwnd,
+                    L"\u7B7E\u540D\u64CD\u4F5C\u5C1A\u672A\u5B8C\u6210\uFF0C\u786E\u5B9A\u8981\u5173\u95ED\u5417\uFF1F",
+                    L"FileSigner", MB_YESNO | MB_ICONWARNING))
+                return 0;
         }
-        DragFinish(hDrop);
-        update_status_bar();
+        DestroyWindow(hwnd);
         return 0;
     }
     case WM_DESTROY:
+        if (g_hThread) {
+            WaitForSingleObject(g_hThread, INFINITE);
+            CloseHandle(g_hThread);
+            g_hThread = NULL;
+        }
         PostQuitMessage(0);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
-
 
 /* ---------------------------------------------------------------- */
 /* Entry point                                                      */
@@ -837,60 +893,47 @@ gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     g_hInst = hInstance;
 
-    /* Initialize common controls (ListView, Toolbar, StatusBar) */
-    INITCOMMONCONTROLSEX icc;
-    icc.dwSize = sizeof(icc);
-    icc.dwICC  = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
-    InitCommonControlsEx(&icc);
-
-    /* COM for SHBrowseForFolder */
     OleInitialize(NULL);
 
-    /* Register window class */
-    WNDCLASSEXW wc;
-    memset(&wc, 0, sizeof(wc));
+    WNDCLASSEXW wc = {0};
     wc.cbSize        = sizeof(wc);
-    wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
+    wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MAIN_ICON));
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszMenuName  = NULL;
-    wc.lpszClassName = WC_FILESIGNER;
-    wc.hIconSm       = NULL;
+    wc.hbrBackground = NULL;
+    wc.lpszClassName = L"FileSignerClass";
 
-    if (!RegisterClassExW(&wc)) {
-        OleUninitialize();
-        return 1;
-    }
+    if (!RegisterClassExW(&wc)) return 1;
 
-    /* Create window */
-    g_hwndMain = CreateWindowExW(0, WC_FILESIGNER, L"FileSigner",
-                                  WS_OVERLAPPEDWINDOW,
-                                  CW_USEDEFAULT, CW_USEDEFAULT,
-                                  900, 600,
-                                  NULL, create_menu_bar(), hInstance, NULL);
-    if (!g_hwndMain) {
-        OleUninitialize();
-        return 1;
-    }
+    RECT rc = { 0, 0, W_CLIENT, 720 };
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+
+    g_hwndMain = CreateWindowExW(0, L"FileSignerClass", L"FileSigner",
+                                 WS_OVERLAPPEDWINDOW,
+                                 CW_USEDEFAULT, CW_USEDEFAULT,
+                                 w, h, NULL, NULL, hInstance, NULL);
+    if (!g_hwndMain) { OleUninitialize(); return 1; }
 
     ShowWindow(g_hwndMain, nCmdShow ? nCmdShow : SW_SHOWDEFAULT);
-    UpdateWindow(g_hwndMain);
+    UpdateWindow(hwnd);
 
-    /* Message loop */
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
-    /* Drain any leftover sign job messages */
-    if (g_signing) {
-        MSG dummy;
-        while (PeekMessageW(&dummy, NULL, WM_GUI_UPDATE_ROW, WM_GUI_SIGN_DONE, PM_REMOVE));
-    }
+    if (g_hFont)       DeleteObject(g_hFont);
+    if (g_hFontSection) DeleteObject(g_hFontSection);
+    if (g_hMonoFont)    DeleteObject(g_hMonoFont);
+    if (g_hbrBg)        DeleteObject(g_hbrBg);
+    if (g_hbrLogBg)     DeleteObject(g_hbrLogBg);
+    if (g_hbrEditBg)    DeleteObject(g_hbrEditBg);
+    if (g_hbrAccent)    DeleteObject(g_hbrAccent);
 
     OleUninitialize();
     return (int)msg.wParam;
