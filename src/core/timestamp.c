@@ -53,13 +53,19 @@ static int der_write_oid(unsigned char *buf, const char *oid_str)
     ASN1_OBJECT *obj = OBJ_txt2obj(oid_str, 0);
     if (!obj) return 0;
 
-    int len = i2d_ASN1_OBJECT(obj, NULL);
-    if (len <= 0) { ASN1_OBJECT_free(obj); return 0; }
+    unsigned char tmp[64];
+    int full_len = i2d_ASN1_OBJECT(obj, NULL);
+    if (full_len <= 0 || full_len > (int)sizeof(tmp)) {
+        ASN1_OBJECT_free(obj); return 0;
+    }
 
-    unsigned char *tmp = buf;
-    i2d_ASN1_OBJECT(obj, &tmp);
+    unsigned char *p = tmp;
+    i2d_ASN1_OBJECT(obj, &p);
     ASN1_OBJECT_free(obj);
-    return len;
+
+    /* Output full DER (tag + length + content) */
+    memcpy(buf, tmp, full_len);
+    return full_len;
 }
 
 static int der_write_octet_string(unsigned char *buf,
@@ -109,42 +115,58 @@ static unsigned char* build_timestamp_request(const unsigned char *digest,
                                                int algo_nid,
                                                size_t *out_len)
 {
-    unsigned char inner[1024];
-    unsigned char msg_imprint[512];
-    unsigned char hash_alg[64];
-    unsigned char hash_val[256];
-    int hi, ha, mi, ii;
-    size_t total;
+    /*
+     * TimeStampReq ::= SEQUENCE {
+     *   version         INTEGER 1,
+     *   messageImprint  SEQUENCE {
+     *     algorithm  SEQUENCE { OID, NULL },
+     *     hash       OCTET STRING
+     *   }
+     * }
+     */
 
-    /* HashAlgorithmIdentifier */
-    ha = 0;
-    ha += der_write_oid(hash_alg + ha, OBJ_nid2sn(algo_nid));
-    ha += der_write_null(hash_alg + ha);
-
-    /* Digest (OCTET STRING) */
-    hi = der_write_octet_string(hash_val, digest, digest_len);
-
-    /* MessageImprint SEQUENCE */
-    mi = 0;
-    memcpy(msg_imprint + mi, hash_alg, ha); mi += ha;
-    memcpy(msg_imprint + mi, hash_val, hi); mi += hi;
-
-    /* Inner content: version + MessageImprint */
-    ii = 0;
-    ii += der_write_integer_small(inner + ii, 1);  /* version = 1 */
-    /* MessageImprint sequence */
+    /* 1. AlgorithmIdentifier = SEQUENCE { OID(sha256), NULL } */
+    unsigned char alg_id[40];
+    int alg_len = 0;
     {
-        int hlen = der_write_tag_len(inner + ii, 0x30, mi);
-        memcpy(inner + ii + hlen, msg_imprint, mi);
-        ii += hlen + mi;
+        unsigned char oid[32];
+        int oid_len = der_write_oid(oid, OBJ_nid2sn(algo_nid));
+        /* body = full DER OID + NULL */
+        unsigned char body[40];
+        int blen = 0;
+        memcpy(body, oid, oid_len); blen += oid_len;
+        body[blen++] = 0x05; body[blen++] = 0x00;    /* NULL */
+        alg_len = der_write_tag_len(alg_id, 0x30, blen);
+        memcpy(alg_id + alg_len, body, blen); alg_len += blen;
     }
 
-    /* Full TimeStampReq SEQUENCE — tag(1) + max len encoding(4) + body */
-    total = (size_t)ii + 5;
-    unsigned char *result = (unsigned char *)malloc(total);
+    /* 2. OCTET STRING header for digest */
+    unsigned char hash_hdr[8];
+    int hh_len = der_write_tag_len(hash_hdr, 0x04, digest_len);
+
+    /* 3. MessageImprint body = alg_id || hash_hdr || digest */
+    int mi_body = alg_len + hh_len + (int)digest_len;
+
+    /* 4. version = INTEGER(1) */
+    unsigned char ver[4];
+    int vl = der_write_integer_small(ver, 1);
+
+    /* 5. Assemble inner: version + MessageImprint SEQUENCE + certReq(TRUE) */
+    unsigned char inner[1024];
+    int ipos = 0;
+    memcpy(inner + ipos, ver, vl); ipos += vl;
+    ipos += der_write_tag_len(inner + ipos, 0x30, mi_body);
+    memcpy(inner + ipos, alg_id, alg_len); ipos += alg_len;
+    memcpy(inner + ipos, hash_hdr, hh_len); ipos += hh_len;
+    memcpy(inner + ipos, digest, (int)digest_len); ipos += (int)digest_len;
+    /* certReq = TRUE */
+    inner[ipos++] = 0x01; inner[ipos++] = 0x01; inner[ipos++] = 0xFF;
+
+    /* 6. Outer SEQUENCE */
+    unsigned char *result = (unsigned char *)malloc((size_t)ipos + 5);
     if (!result) return NULL;
 
-    *out_len = (size_t)der_write_sequence(result, inner, ii);
+    *out_len = (size_t)der_write_sequence(result, inner, ipos);
     return result;
 }
 
@@ -161,7 +183,6 @@ static unsigned char* http_post(const char *url,
     HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
     URL_COMPONENTS uc;
     WCHAR host[256] = {0}, path[1024] = {0};
-    unsigned char *response = NULL;
     DWORD status_code = 0, size = sizeof(DWORD);
     DWORD bytes_available = 0, total_read = 0;
     unsigned char *result = NULL;
@@ -181,20 +202,34 @@ static unsigned char* http_post(const char *url,
     uc.dwUrlPathLength = 1024;
 
     if (!WinHttpCrackUrl(url_w, 0, 0, &uc)) {
+        fprintf(stderr, "[timestamp] WinHttpCrackUrl failed: err=%lu url=%s\n",
+                GetLastError(), url);
         free(url_w); return NULL;
     }
     free(url_w);
+
+    fprintf(stderr, "[timestamp] POST %S:%lu%S (%lu bytes)\n",
+            host, (unsigned long)uc.nPort, path, (unsigned long)body_len);
 
     /* Open session */
     hSession = WinHttpOpen(L"FileSigner/1.0",
                             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME,
                             WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return NULL;
+    if (!hSession) {
+        fprintf(stderr, "[timestamp] WinHttpOpen failed: err=%lu\n", GetLastError());
+        return NULL;
+    }
+
+    /* Set timeouts: resolve=10s, connect=10s, send=15s, receive=15s */
+    WinHttpSetTimeouts(hSession, 10000, 10000, 15000, 15000);
 
     /* Connect */
     hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
-    if (!hConnect) goto cleanup;
+    if (!hConnect) {
+        fprintf(stderr, "[timestamp] WinHttpConnect failed: err=%lu\n", GetLastError());
+        goto cleanup;
+    }
 
     /* Open request */
     hRequest = WinHttpOpenRequest(hConnect, L"POST", path,
@@ -202,7 +237,19 @@ static unsigned char* http_post(const char *url,
                                    WINHTTP_DEFAULT_ACCEPT_TYPES,
                                    (uc.nScheme == INTERNET_SCHEME_HTTPS) ?
                                        WINHTTP_FLAG_SECURE : 0);
-    if (!hRequest) goto cleanup;
+    if (!hRequest) {
+        fprintf(stderr, "[timestamp] WinHttpOpenRequest failed: err=%lu\n", GetLastError());
+        goto cleanup;
+    }
+
+    /* Enable automatic HTTPS redirect */
+    {
+        DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                      SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                      SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                      SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
+    }
 
     /* Set content type header */
     WinHttpAddRequestHeaders(hRequest,
@@ -211,10 +258,15 @@ static unsigned char* http_post(const char *url,
 
     /* Send request */
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                             (LPVOID)body, (DWORD)body_len, (DWORD)body_len, 0))
+                             (LPVOID)body, (DWORD)body_len, (DWORD)body_len, 0)) {
+        fprintf(stderr, "[timestamp] WinHttpSendRequest failed: err=%lu\n", GetLastError());
         goto cleanup;
+    }
 
-    if (!WinHttpReceiveResponse(hRequest, NULL)) goto cleanup;
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        fprintf(stderr, "[timestamp] WinHttpReceiveResponse failed: err=%lu\n", GetLastError());
+        goto cleanup;
+    }
 
     /* Check status code */
     WinHttpQueryHeaders(hRequest,
@@ -222,12 +274,9 @@ static unsigned char* http_post(const char *url,
                           WINHTTP_HEADER_NAME_BY_INDEX, &status_code,
                           &size, WINHTTP_NO_HEADER_INDEX);
 
-    if (status_code != 200) {
-        fprintf(stderr, "Timestamp server returned HTTP %lu\n", (unsigned long)status_code);
-        goto cleanup;
-    }
+    fprintf(stderr, "[timestamp] HTTP %lu\n", (unsigned long)status_code);
 
-    /* Read response */
+    /* Read response body (both success and error) */
     result = (unsigned char *)malloc(65536);
     if (!result) goto cleanup;
 
@@ -244,7 +293,18 @@ static unsigned char* http_post(const char *url,
 
     if (total_read > 0) {
         *resp_len = total_read;
+        fprintf(stderr, "[timestamp] received %lu bytes\n", (unsigned long)total_read);
+        /* If non-200, dump response for debugging */
+        if (status_code != 200) {
+            fprintf(stderr, "[timestamp] error response (%lu bytes): ", (unsigned long)total_read);
+            for (DWORD i = 0; i < total_read && i < 64; i++)
+                fprintf(stderr, "%02x ", result[i]);
+            fprintf(stderr, "\n");
+            free(result);
+            result = NULL;
+        }
     } else {
+        fprintf(stderr, "[timestamp] empty response\n");
         free(result);
         result = NULL;
     }
@@ -272,10 +332,14 @@ static int parse_timestamp_response(const unsigned char *resp, size_t resp_len,
      *     timeStampToken  TimeStampToken OPTIONAL  -- PKCS#7 ContentInfo
      * }
      *
-     * We use a simple ASN.1 parser to find the timeStampToken field:
-     * Skip the outer SEQUENCE header, parse the PKIStatusInfo (a SEQUENCE),
-     * then the remaining data is the TimeStampToken (PKCS#7 ContentInfo).
+     * Skip PKIStatusInfo, then remaining data is the TimeStampToken.
      */
+
+    /* Diagnostic: dump first 16 bytes */
+    fprintf(stderr, "[timestamp] response (%zu bytes):", resp_len);
+    for (size_t i = 0; i < resp_len && i < 16; i++)
+        fprintf(stderr, " %02x", resp[i]);
+    fprintf(stderr, "\n");
 
     const unsigned char *p = resp;
     const unsigned char *end = resp + resp_len;
@@ -330,6 +394,7 @@ static int parse_timestamp_response(const unsigned char *resp, size_t resp_len,
     /* Check if there's a timeStampToken */
     if (p >= end) {
         /* No optional token */
+        fprintf(stderr, "[timestamp] response has no timeStampToken\n");
         return 0;
     }
 
@@ -359,41 +424,67 @@ int timestamp_request(const unsigned char *digest, size_t digest_len,
     size_t resp_len = 0;
     int ret = 0;
 
+    fprintf(stderr, "[timestamp] requesting from: %s\n", url);
+
     /* Build TimeStampReq */
     req_der = build_timestamp_request(digest, digest_len, algo_nid, &req_len);
     if (!req_der) {
-        fprintf(stderr, "Failed to build timestamp request\n");
+        fprintf(stderr, "[timestamp] failed to build request\n");
         return 0;
     }
+
+    /* Debug: dump request DER */
+    fprintf(stderr, "[timestamp] request DER (%zu bytes):", req_len);
+    for (size_t i = 0; i < req_len; i++) fprintf(stderr, " %02x", req_der[i]);
+    fprintf(stderr, "\n");
 
 #ifdef _WIN32
     /* Send HTTP POST */
     http_resp = http_post(url, req_der, req_len, &resp_len);
     if (!http_resp) {
-        fprintf(stderr, "HTTP POST to timestamp server failed\n");
+        fprintf(stderr, "[timestamp] HTTP POST failed\n");
         free(req_der);
         return 0;
     }
 
     /* Parse response */
     if (!parse_timestamp_response(http_resp, resp_len, out_token, out_len)) {
-        fprintf(stderr, "Failed to parse timestamp response\n");
+        fprintf(stderr, "[timestamp] failed to parse response (%zu bytes)\n", resp_len);
         free(http_resp);
         free(req_der);
         return 0;
     }
 
+    fprintf(stderr, "[timestamp] token obtained: %zu bytes\n", *out_len);
     ret = 1;
     free(http_resp);
 #else
     (void)url;
     (void)out_token;
     (void)out_len;
-    fprintf(stderr, "Timestamp requests require WinHTTP (Windows only)\n");
+    fprintf(stderr, "[timestamp] WinHTTP required (Windows only)\n");
 #endif
 
     free(req_der);
     return ret;
+}
+
+/* Helper: write DER tag + length header, return header length */
+static int write_tl(unsigned char *out, unsigned char tag, size_t body_len)
+{
+    int n = 0;
+    out[n++] = tag;
+    if (body_len < 0x80) {
+        out[n++] = (unsigned char)body_len;
+    } else if (body_len < 0x100) {
+        out[n++] = 0x81;
+        out[n++] = (unsigned char)body_len;
+    } else {
+        out[n++] = 0x82;
+        out[n++] = (unsigned char)(body_len >> 8);
+        out[n++] = (unsigned char)(body_len & 0xFF);
+    }
+    return n;
 }
 
 int timestamp_attach_to_signer(void *vsi,
@@ -401,38 +492,66 @@ int timestamp_attach_to_signer(void *vsi,
                                 size_t token_len)
 {
     PKCS7_SIGNER_INFO *si = (PKCS7_SIGNER_INFO *)vsi;
-    ASN1_OBJECT *oid;
-    ASN1_OCTET_STRING *os;
-    X509_ATTRIBUTE *attr;
+    X509_ATTRIBUTE *attr = NULL;
+    unsigned char oid_buf[64];
+    int oid_len;
+    unsigned char *der, *p;
+    unsigned char tl[5];
+    int set_hl, seq_hl;
+    size_t set_body, seq_body, total;
 
-    if (!si || !token_der || token_len == 0)
-        return 0;
-
-    /* Create OID for timestamp token */
-    oid = OBJ_txt2obj(TIMESTAMP_TOKEN_OID, 0);
-    if (!oid) return 0;
-
-    /* Create OCTET STRING wrapping the token DER */
-    os = ASN1_OCTET_STRING_new();
-    if (!os) { ASN1_OBJECT_free(oid); return 0; }
-
-    if (!ASN1_OCTET_STRING_set(os, token_der, (int)token_len)) {
-        ASN1_OBJECT_free(oid);
-        ASN1_OCTET_STRING_free(os);
+    if (!si || !token_der || token_len == 0) {
+        fprintf(stderr, "[timestamp] attach: invalid params\n");
         return 0;
     }
 
-    /* Create attribute with NID, type=OCTET_STRING, value=os */
-    attr = X509_ATTRIBUTE_create(
-        OBJ_txt2nid(TIMESTAMP_TOKEN_OID),
-        V_ASN1_OCTET_STRING, os);
+    fprintf(stderr, "[timestamp] attach: token %zu bytes, first 8:", token_len);
+    for (size_t i = 0; i < token_len && i < 8; i++)
+        fprintf(stderr, " %02x", token_der[i]);
+    fprintf(stderr, "\n");
 
-    ASN1_OBJECT_free(oid);
-    ASN1_OCTET_STRING_free(os);
+    /* Encode OID as full DER (tag+length+value) */
+    ASN1_OBJECT *obj = OBJ_txt2obj(TIMESTAMP_TOKEN_OID, 1);
+    if (!obj) { fprintf(stderr, "[timestamp] attach: OID failed\n"); return 0; }
+    oid_len = i2d_ASN1_OBJECT(obj, NULL);
+    if (oid_len <= 0 || oid_len > (int)sizeof(oid_buf)) {
+        ASN1_OBJECT_free(obj); return 0;
+    }
+    unsigned char *op = oid_buf;
+    i2d_ASN1_OBJECT(obj, &op);
+    ASN1_OBJECT_free(obj);
 
-    if (!attr) return 0;
+    /*
+     * Build Attribute DER: SEQUENCE { OID, SET { token } }
+     * Token goes directly into SET (no OCTET STRING wrapper).
+     */
+    set_body = (size_t)oid_len + token_len;
+    set_hl = write_tl(tl, 0x31, set_body);  /* measure SET header */
+    seq_body = (size_t)set_hl + set_body;
+    seq_hl = write_tl(tl, 0x30, seq_body);  /* measure SEQ header */
+    total = (size_t)seq_hl + seq_body;
 
-    /* Add to unauthenticated attributes */
+    der = (unsigned char *)malloc(total);
+    if (!der) return 0;
+
+    p = der;
+    write_tl(p, 0x30, seq_body); p += seq_hl;   /* SEQUENCE */
+    write_tl(p, 0x31, set_body); p += set_hl;   /* SET */
+    memcpy(p, oid_buf, oid_len);  p += oid_len;
+    memcpy(p, token_der, token_len);
+
+    /* Parse DER into X509_ATTRIBUTE */
+    {
+        const unsigned char *tp = der;
+        attr = d2i_X509_ATTRIBUTE(NULL, &tp, (int)total);
+    }
+    free(der);
+
+    if (!attr) {
+        fprintf(stderr, "[timestamp] attach: d2i_X509_ATTRIBUTE failed\n");
+        return 0;
+    }
+
     if (!si->unauth_attr)
         si->unauth_attr = sk_X509_ATTRIBUTE_new_null();
 
@@ -441,5 +560,7 @@ int timestamp_attach_to_signer(void *vsi,
         return 0;
     }
 
+    fprintf(stderr, "[timestamp] attach: done (count=%d)\n",
+            sk_X509_ATTRIBUTE_num(si->unauth_attr));
     return 1;
 }
