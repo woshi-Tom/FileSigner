@@ -50,13 +50,157 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 #define IDC_PROGRESS        212
 #define IDC_LIST_LOG        213
 
+/* Restore certificate page control IDs (were removed) */
 #define IDC_EDIT_CERT_DIR   301
 #define IDC_BTN_BROWSE_CD   302
 #define IDC_EDIT_CERT_DAYS  303
 #define IDC_BTN_GENERATE    304
 #define IDC_LBL_CERT_STATUS 305
 #define IDC_EDIT_CERT_PW    306
+#define IDC_EDIT_CERT_CN    307
+#define IDC_EDIT_CERT_EMAIL 308
 
+/* Worker-thread support: custom messages and task struct */
+#define WM_APP_LOG          (WM_APP + 1)
+#define WM_APP_PROGRESS     (WM_APP + 2)
+#define WM_APP_SIGN_DONE    (WM_APP + 3)
+
+/* Forward declarations for helper functions defined later */
+static void wide_from_utf8(const char *src, wchar_t *dst, int dst_chars);
+static void wide_to_utf8(const wchar_t *src, char *dst, int dst_chars);
+
+typedef struct {
+    HWND hwnd; /* main window to post messages to */
+    char target[MAX_PATH];
+    char pfx[MAX_PATH];
+    char password[256];
+    char ts_url[512];
+    char outdir[MAX_PATH];
+    int recursive;
+    int force;
+    int debug;
+} SignTask;
+
+static void post_log_wstr(HWND hwnd, const wchar_t *wmsg)
+{
+    if (!wmsg) return;
+    size_t len = wcslen(wmsg) + 1;
+    wchar_t *copy = (wchar_t *)malloc(len * sizeof(wchar_t));
+    if (!copy) return;
+    wcscpy(copy, wmsg);
+    if (!PostMessageW(hwnd, WM_APP_LOG, 0, (LPARAM)copy))
+        free(copy);
+}
+
+static void post_log_utf8(HWND hwnd, const char *fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    wchar_t wbuf[1024];
+    wide_from_utf8(buf, wbuf, (int)(sizeof(wbuf)/sizeof(wchar_t)));
+    post_log_wstr(hwnd, wbuf);
+}
+
+static void post_progress(HWND hwnd, int percent)
+{
+    PostMessageW(hwnd, WM_APP_PROGRESS, (WPARAM)percent, 0);
+}
+
+/* Thread callbacks passed to core signing APIs */
+static void thread_status_cb(const char *status, void *user_data)
+{
+    SignTask *task = (SignTask *)user_data;
+    if (!task || !status) return;
+    wchar_t wstatus[512];
+    wide_from_utf8(status, wstatus, 512);
+    post_log_wstr(task->hwnd, wstatus);
+}
+
+static void thread_progress_cb(const char *filename, int current, int total,
+                               int success, void *user_data)
+{
+    SignTask *task = (SignTask *)user_data;
+    if (!task || !filename) return;
+    if (total > 0) {
+        int percent = (int)(current * 100 / total);
+        post_progress(task->hwnd, percent);
+    }
+    wchar_t wfilename[MAX_PATH];
+    wide_from_utf8(filename, wfilename, MAX_PATH);
+
+    if (success == 1) {
+        wchar_t msg[MAX_PATH + 32];
+        wsprintfW(msg, L"[OK] %s", wfilename);
+        post_log_wstr(task->hwnd, msg);
+    } else if (success == -2) {
+        wchar_t msg[MAX_PATH + 64];
+        wsprintfW(msg, L"[跳过] %s (已签名，请勾选\"强制重新签名\")", wfilename);
+        post_log_wstr(task->hwnd, msg);
+    } else if (success == -3) {
+        post_log_wstr(task->hwnd, wfilename);
+    } else if (success == -4) {
+        wchar_t msg[MAX_PATH + 32];
+        wsprintfW(msg, L"  %s", wfilename);
+        post_log_wstr(task->hwnd, msg);
+    } else if (success == 0) {
+        wchar_t msg[MAX_PATH + 32];
+        wsprintfW(msg, L"[失败] %s", wfilename);
+        post_log_wstr(task->hwnd, msg);
+    }
+}
+
+static DWORD WINAPI sign_thread_proc(LPVOID param)
+{
+    SignTask *task = (SignTask *)param;
+    if (!task) return 0;
+
+    HWND hwnd = task->hwnd;
+    int count = 0;
+    int crashed = 0;
+
+    __try {
+        if (directory_exists(task->target)) {
+            post_log_utf8(hwnd, "开始批量签名...");
+            if (task->outdir[0] && !directory_exists(task->outdir)) create_directory(task->outdir);
+            count = batch_sign(task->target, task->pfx, task->password[0] ? task->password : NULL,
+                                task->ts_url[0] ? task->ts_url : NULL,
+                                task->outdir[0] ? task->outdir : NULL,
+                                task->force, task->recursive,
+                                thread_progress_cb, task);
+        } else if (file_exists(task->target)) {
+            post_log_utf8(hwnd, "正在签名: %s", task->target);
+            if (authenticode_sign(task->target, task->pfx, task->password[0] ? task->password : NULL,
+                                   task->ts_url[0] ? task->ts_url : NULL,
+                                   task->outdir[0] ? task->outdir : task->target,
+                                   thread_status_cb, task)) {
+                count = 1;
+                post_log_utf8(hwnd, "[OK] 签名完成");
+            } else {
+                post_log_utf8(hwnd, "[FAIL] 签名失败");
+            }
+            post_progress(hwnd, 100);
+        } else {
+            wchar_t wmsg[MAX_PATH + 32];
+            wchar_t wtarget[MAX_PATH];
+            wide_from_utf8(task->target, wtarget, MAX_PATH);
+            wsprintfW(wmsg, L"错误: 目标不存在: %s", wtarget);
+            post_log_wstr(hwnd, wmsg);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        crashed = 1;
+        post_log_utf8(hwnd, "[CRASH] 签名过程发生异常 (错误码: 0x%08X)", GetExceptionCode());
+        post_log_utf8(hwnd, "可能原因: 文件损坏、内存不足、或 OpenSSL 内部错误");
+    }
+
+    free(task);
+    PostMessageW(hwnd, WM_APP_SIGN_DONE, (WPARAM)(crashed ? -1 : count), 0);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Layout constants */
 #define PAD             14      /* outer padding */
 #define GAP             10      /* vertical gap between groups */
@@ -81,6 +225,7 @@ static HFONT g_hMonoFont;
 static HWND g_hTab;
 static HWND g_hPageSign, g_hPageCert;
 static HWND g_hProgress, g_hLog;
+static HANDLE g_hThread = NULL;  /* signing worker thread */
 static int g_debug = 0;  /* 0=normal, 1=debug */
 
 /* Color scheme */
@@ -245,7 +390,7 @@ static void create_sign_page(HWND parent)
     /* Timestamp */
     make_ctrl(g_hPageSign, L"STATIC", L"时间戳服务器 URL (可选):", 0, 8, y, edit_x, LH, 0);
     y += LH + 3;
-    make_ctrl(g_hPageSign, L"EDIT", L"http://timestamp.digicert.com",
+    make_ctrl(g_hPageSign, L"EDIT", L"https://freetsa.org/tsr",
               WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT + W_BROWSE + 6, EH, IDC_EDIT_TIMESTAMP);
     y += EH + 6;
@@ -359,6 +504,22 @@ static void create_cert_page(HWND parent)
     make_ctrl(g_hPageCert, L"EDIT", L"",
               WS_BORDER | ES_AUTOHSCROLL,
               0, y, 280, EH, IDC_EDIT_CERT_PW);
+    y += EH + 8;
+
+    /* Signer CN (name) */
+    make_ctrl(g_hPageCert, L"STATIC", L"签名者姓名 (CN, 可选, 默认: FileSigner Code Signing):", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
+    make_ctrl(g_hPageCert, L"EDIT", L"",
+              WS_BORDER | ES_AUTOHSCROLL,
+              0, y, 280, EH, IDC_EDIT_CERT_CN);
+    y += EH + 8;
+
+    /* Signer email */
+    make_ctrl(g_hPageCert, L"STATIC", L"签名者邮箱 (可选, 用于证书标识):", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
+    y += LH + 3;
+    make_ctrl(g_hPageCert, L"EDIT", L"",
+              WS_BORDER | ES_AUTOHSCROLL,
+              0, y, 280, EH, IDC_EDIT_CERT_EMAIL);
     y += EH + 10;
 
     /* Separator line */
@@ -387,89 +548,82 @@ static void switch_tab(int idx)
 }
 
 /* ------------------------------------------------------------------ */
-/* Signing progress callback                                           */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    HWND hProgress;
-    HWND hLog;
-    HWND hBtnSign;
-} SignProgressCtx;
-
-static void sign_progress_cb(const char *filename, int current, int total,
-                              int success, void *user_data)
-{
-    SignProgressCtx *ctx = (SignProgressCtx *)user_data;
-    if (total > 0)
-        SendMessageW(ctx->hProgress, PBM_SETPOS, (WPARAM)(current * 100 / total), 0);
-
-    wchar_t wfilename[MAX_PATH];
-    wide_from_utf8(filename, wfilename, MAX_PATH);
-
-    if (success == 1)
-        log_message(ctx->hLog, L"[OK] %s", wfilename);
-    else if (success == -2)
-        log_message(ctx->hLog, L"[跳过] %s (已签名，请勾选\"强制重新签名\")", wfilename);
-    else if (success == -3)
-        log_debug(ctx->hLog, L"%s", wfilename);
-    else if (success == 0)
-        log_message(ctx->hLog, L"[失败] %s", wfilename);
-
-    /* Keep UI responsive — process paint/input but handle WM_QUIT safely */
-    __try {
-        MSG msg;
-        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) {
-                PostQuitMessage((int)msg.wParam);
-                return;
-            }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        log_message(ctx->hLog, L"[警告] UI 消息处理异常: 0x%08X", GetExceptionCode());
-    }
-}
-
-/* ------------------------------------------------------------------ */
 /* Window procedure                                                    */
 /* ------------------------------------------------------------------ */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
-    case WM_CREATE:
+    case WM_APP_LOG:
     {
-        /* Tab control */
-        g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
-                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
-                                  | TCS_FLATBUTTONS,
-                                  0, 0, W_CLIENT, TAB_H + 4,
-                                  hwnd, (HMENU)IDC_TAB, g_hInst, NULL);
-        SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-
-        TCITEMW tie;
-        tie.mask = TCIF_TEXT;
-        tie.pszText = L"  签名  ";
-        SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&tie);
-        tie.pszText = L"  生成证书  ";
-        SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&tie);
-
-        create_sign_page(hwnd);
-        create_cert_page(hwnd);
-        apply_font(g_hPageSign);
-        apply_font(g_hPageCert);
-        /* Subclass page panels to forward WM_COMMAND to main window */
-        SetWindowSubclass(g_hPageSign, page_subclass, 0, 0);
-        SetWindowSubclass(g_hPageCert, page_subclass, 0, 0);
-        switch_tab(0);
-
-        SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
-        SendMessageW(g_hProgress, PBM_SETBARCOLOR, 0, (LPARAM)g_clrAccent);
-        SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, (LPARAM)RGB(220, 225, 232));
-
+        wchar_t *wmsg = (wchar_t *)lParam;
+        if (wmsg) {
+            int idx = (int)SendMessageW(g_hLog, LB_ADDSTRING, 0, (LPARAM)wmsg);
+            SendMessageW(g_hLog, LB_SETTOPINDEX, idx, 0);
+            free(wmsg);
+        }
         return 0;
     }
+    case WM_APP_PROGRESS:
+    {
+        int pct = (int)wParam;
+        SendMessageW(g_hProgress, PBM_SETPOS, (WPARAM)pct, 0);
+        return 0;
+    }
+    case WM_APP_SIGN_DONE:
+    {
+        /* Clean up thread handle */
+        if (g_hThread) {
+            WaitForSingleObject(g_hThread, INFINITE);
+            CloseHandle(g_hThread);
+            g_hThread = NULL;
+        }
+        int count = (int)wParam;
+        if (count < 0) {
+            log_message(g_hLog, L"签名过程异常终止，请检查输入文件和证书");
+        } else {
+            wchar_t completed[128];
+            wsprintfW(completed, L"完成 - 已签名 %d 个文件", count);
+            log_message(g_hLog, L"%ls", completed);
+        }
+        /* Re-enable sign button */
+        HWND hBtn = GetDlgItem(g_hPageSign, IDC_BTN_SIGN);
+        EnableWindow(hBtn, TRUE);
+        return 0;
+    }
+
+        case WM_CREATE:
+        {
+            /* Tab control */
+            g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
+                                      | TCS_FLATBUTTONS,
+                                      0, 0, W_CLIENT, TAB_H + 4,
+                                      hwnd, (HMENU)IDC_TAB, g_hInst, NULL);
+            SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+            TCITEMW tie;
+            tie.mask = TCIF_TEXT;
+            tie.pszText = L"  签名  ";
+            SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&tie);
+            tie.pszText = L"  生成证书  ";
+            SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&tie);
+
+            create_sign_page(hwnd);
+            create_cert_page(hwnd);
+            apply_font(g_hPageSign);
+            apply_font(g_hPageCert);
+            /* Subclass page panels to forward WM_COMMAND to main window */
+            SetWindowSubclass(g_hPageSign, page_subclass, 0, 0);
+            SetWindowSubclass(g_hPageCert, page_subclass, 0, 0);
+            switch_tab(0);
+
+            SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
+            SendMessageW(g_hProgress, PBM_SETBARCOLOR, 0, (LPARAM)g_clrAccent);
+            SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, (LPARAM)RGB(220, 225, 232));
+
+            return 0;
+        }
 
     case WM_CTLCOLORSTATIC:
     {
@@ -599,7 +753,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         else if (id == IDC_BTN_BROWSE_PFX) {
             wchar_t path[MAX_PATH] = {0};
             if (browse_file(hwnd,
-                            L"PFX 文件\0*.pfx;*.p12\所有文件\0*.*\0",
+                            L"PFX 文件" L"\0" L"*.pfx;*.p12"
+                            L"\0" L"所有文件" L"\0" L"*.*" L"\0",
                             L"选择 PFX 文件", path, MAX_PATH))
                 SetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, path);
         }
@@ -641,52 +796,43 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             wide_to_utf8(wts_url, ts_url, 512);
             wide_to_utf8(woutdir, outdir, MAX_PATH);
 
-            const char *ts = (ts_url[0]) ? ts_url : NULL;
-            const char *out = (outdir[0]) ? outdir : NULL;
+            /* Prevent concurrent signing */
+            if (g_hThread) {
+                MessageBoxW(hwnd, L"签名操作正在进行中，请等待完成。",
+                            L"提示", MB_OK | MB_ICONINFORMATION);
+                break;
+            }
 
+            /* Build task for worker thread */
+            SignTask *task = (SignTask *)calloc(1, sizeof(SignTask));
+            if (!task) {
+                MessageBoxW(hwnd, L"内存分配失败。", L"错误", MB_OK | MB_ICONERROR);
+                break;
+            }
+            task->hwnd = hwnd;
+            strcpy(task->target, target);
+            strcpy(task->pfx, pfx);
+            if (password[0]) strcpy(task->password, password);
+            if (ts_url[0]) strcpy(task->ts_url, ts_url);
+            if (outdir[0]) strcpy(task->outdir, outdir);
+            task->recursive = recursive;
+            task->force = force;
+            task->debug = g_debug;
+
+            /* Disable button, reset progress, clear log */
             HWND hBtn = GetDlgItem(g_hPageSign, IDC_BTN_SIGN);
             EnableWindow(hBtn, FALSE);
             SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
             SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
             log_message(g_hLog, L"开始签名...");
-            log_debug(g_hLog, L"目标: %s", wtarget);
-            log_debug(g_hLog, L"PFX: %s", wpfx);
-            log_debug(g_hLog, L"密码: %ls", wpassword[0] ? L"***" : L"(空)");
-            log_debug(g_hLog, L"输出: %s", woutdir[0] ? woutdir : L"(覆盖原文件)");
-            log_debug(g_hLog, L"强制: %s  递归: %s",
-                        force ? L"是" : L"否", recursive ? L"是" : L"否");
 
-            SignProgressCtx ctx = { g_hProgress, g_hLog, hBtn };
-            int count = 0;
-
-            __try {
-                if (directory_exists(target)) {
-                    log_debug(g_hLog, L"[调试] 检测为目录");
-                    if (out && !directory_exists(out)) create_directory(out);
-                    count = batch_sign(target, pfx, password[0] ? password : NULL,
-                                        ts, out, force, recursive,
-                                        sign_progress_cb, &ctx);
-                } else if (file_exists(target)) {
-                    log_debug(g_hLog, L"[调试] 检测为文件");
-                    log_message(g_hLog, L"正在签名: %s", wtarget);
-                    if (authenticode_sign(target, pfx, password[0] ? password : NULL,
-                                           ts, out ? out : target)) {
-                        count = 1;
-                        log_message(g_hLog, L"[OK] 签名完成");
-                    } else {
-                        log_message(g_hLog, L"[FAIL] 签名失败");
-                    }
-                    SendMessageW(g_hProgress, PBM_SETPOS, 100, 0);
-                } else {
-                    log_message(g_hLog, L"错误: 目标不存在: %s", wtarget);
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {
-                log_message(g_hLog, L"[严重错误] 签名过程崩溃! 异常代码: 0x%08X",
-                            GetExceptionCode());
+            /* Launch worker thread */
+            g_hThread = CreateThread(NULL, 0, sign_thread_proc, task, 0, NULL);
+            if (!g_hThread) {
+                free(task);
+                EnableWindow(hBtn, TRUE);
+                MessageBoxW(hwnd, L"无法创建签名线程。", L"错误", MB_OK | MB_ICONERROR);
             }
-
-            log_message(g_hLog, L"完成 - 已签名 %d 个文件", count);
-            EnableWindow(hBtn, TRUE);
         }
 
         else if (id == IDC_BTN_BROWSE_CD) {
@@ -696,9 +842,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         else if (id == IDC_BTN_GENERATE) {
             wchar_t wdir[MAX_PATH], wdays_str[16], wpw[256];
+            wchar_t wcn[256], wemail[256];
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, wdir, MAX_PATH);
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DAYS, wdays_str, 16);
             GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_PW, wpw, 256);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_CN, wcn, 256);
+            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_EMAIL, wemail, 256);
 
             if (wcslen(wdir) == 0) {
                 MessageBoxW(hwnd, L"请选择输出目录。",
@@ -709,9 +858,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int days = _wtoi(wdays_str);
             if (days <= 0) days = 90;
 
-            char dir[MAX_PATH], pw[256];
+            char dir[MAX_PATH], pw[256], cn[256], email[256];
             wide_to_utf8(wdir, dir, MAX_PATH);
             wide_to_utf8(wpw, pw, 256);
+            wide_to_utf8(wcn, cn, 256);
+            wide_to_utf8(wemail, email, 256);
             if (!directory_exists(dir)) create_directory(dir);
 
             HWND hBtn = GetDlgItem(g_hPageCert, IDC_BTN_GENERATE);
@@ -719,7 +870,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, L"正在生成...");
 
             const char *pfx_pw = pw[0] ? pw : NULL;
-            if (cert_generate(dir, NULL, pfx_pw, days)) {
+            const char *cert_cn = cn[0] ? cn : NULL;
+            const char *cert_email = email[0] ? email : NULL;
+            if (cert_generate(dir, NULL, pfx_pw, days, cert_cn, cert_email)) {
                 wchar_t msg[512];
                 if (wpw[0])
                     wsprintfW(msg,
@@ -752,7 +905,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    case WM_CLOSE:
+        /* Block close while signing thread is running */
+        if (g_hThread) {
+            MessageBoxW(hwnd, L"签名操作正在进行中，请等待完成后再关闭。",
+                        L"提示", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        break;  /* fall through to DefWindowProcW */
+
     case WM_DESTROY:
+        /* Wait for thread if still running (defensive) */
+        if (g_hThread) {
+            WaitForSingleObject(g_hThread, INFINITE);
+            CloseHandle(g_hThread);
+            g_hThread = NULL;
+        }
         PostQuitMessage(0);
         return 0;
     }
