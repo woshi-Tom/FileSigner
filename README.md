@@ -12,6 +12,10 @@ FileSigner 是一个基于 C 语言和 OpenSSL 开发的批量文件签名工具
 
 ## 快速开始
 
+## 深入了解
+
+- [📖 时间戳安全性详解](./docs/timestamp-security.md) — 哈希碰撞、本地篡改攻击、TSA 信任模型等常见疑虑的深度解答
+
 ### 编译
 ```bash
 # 使用 CMake
