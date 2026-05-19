@@ -14,12 +14,15 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
-/* sciter-om.h uses nullptr which is C++/C23 only — provide compat for C11 */
-#ifndef __cplusplus
-#define nullptr ((void*)0)
-#endif
-
-#include "sciter-x.h"
+/* Skip sciter-x.h (pulls in sciter-om.h which has C++ code under #ifdef CPP11).
+ * Include only the sub-headers we need.  Forward-declare the om types used
+ * by sciter-x-api.h so we can avoid sciter-om.h's CPP11 guard entirely. */
+#include "sciter-x-types.h"
+#include "sciter-x-def.h"
+#include "sciter-x-value.h"
+struct som_asset_t;          /* sciter-x-api.h uses som_asset_t* in inline wrappers */
+struct som_asset_class_t;
+#include "sciter-x-api.h"
 #include "resource.h"
 
 #include "batch_signer.h"
