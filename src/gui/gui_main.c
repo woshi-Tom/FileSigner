@@ -244,7 +244,7 @@ static HBRUSH g_hbrLogBg;          /* log area dark background */
 static HBRUSH g_hbrEditBg;         /* edit control background */
 static HBRUSH g_hbrBtnFace;        /* button/checkbox background */
 static HBRUSH g_hbrAccent;         /* accent color for primary buttons */
-static COLORREF g_clrBg            = RGB(244, 245, 248);  /* #F4F5F8 warm off-white */
+static COLORREF g_clrBg            = RGB(235, 237, 242);  /* #EBEDF2 cool light gray */
 static COLORREF g_clrLogBg         = RGB(34, 35, 38);     /* #222326 dark warm */
 static COLORREF g_clrLogText       = RGB(232, 233, 237);  /* #E8E9ED light gray */
 static COLORREF g_clrAccent        = RGB(94, 106, 210);   /* #5E6AD2 slate blue-violet */
@@ -361,7 +361,7 @@ static HWND make_ctrl(HWND parent, const wchar_t *cls, const wchar_t *text,
 static void create_sign_page(HWND parent)
 {
     g_hPageSign = CreateWindowExW(0, L"STATIC", L"",
-                                   WS_CHILD | WS_VISIBLE,
+                                   WS_CHILD | WS_VISIBLE | WS_BORDER,
                                    PAD, PAGE_TOP,
                                    W_CLIENT - 2*PAD, PAGE_H,
                                    parent, NULL, g_hInst, NULL);
@@ -488,7 +488,7 @@ static void create_sign_page(HWND parent)
 static void create_cert_page(HWND parent)
 {
     g_hPageCert = CreateWindowExW(0, L"STATIC", L"",
-                                   WS_CHILD,
+                                   WS_CHILD | WS_BORDER,
                                    PAD, PAGE_TOP,
                                    W_CLIENT - 2*PAD, PAGE_H,
                                    parent, NULL, g_hInst, NULL);
