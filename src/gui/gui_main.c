@@ -391,6 +391,25 @@ post_log_utf8(int color, const char *fmt, ...)
 }
 
 static void
+log_debug_utf8(const char *fmt, ...)
+{
+    if (!g_debug) return;
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    wchar_t wbuf[1024];
+    wide_from_utf8(buf, wbuf, 1024);
+    size_t len = wcslen(wbuf) + 1;
+    wchar_t *copy = malloc(len * sizeof(wchar_t));
+    if (!copy) return;
+    wcscpy(copy, wbuf);
+    if (!PostMessageW(g_hwndMain, WM_APP_LOG, (WPARAM)LOG_COLOR_INFO, (LPARAM)copy))
+        free(copy);
+}
+
+static void
 post_progress(int percent)
 {
     PostMessageW(g_hwndMain, WM_APP_PROGRESS, (WPARAM)percent, 0);
@@ -418,6 +437,9 @@ thread_progress_cb(const char *filename, int current, int total,
         post_log_utf8(LOG_COLOR_INFO, "  %s", filename);
     else if (success == 0)
         post_log_utf8(LOG_COLOR_FAIL, "[\u5931\u8D25] %s", filename);
+
+    log_debug_utf8("  [\u8C03\u8BD5] \u8FDB\u5EA6: %d/%d, \u7ED3\u679C: %d",
+                   current, total, success);
 }
 
 static DWORD WINAPI
@@ -427,6 +449,11 @@ sign_thread_proc(LPVOID param)
     if (!task) return 0;
 
     HWND hwnd = task->hwnd;
+    log_debug_utf8("[\u8C03\u8BD5] \u76EE\u6807: %s", task->target);
+    log_debug_utf8("[\u8C03\u8BD5] PFX: %s", task->pfx);
+    log_debug_utf8("[\u8C03\u8BD5] TSA: %s", task->ts_url[0] ? task->ts_url : "(\u65E0)");
+    log_debug_utf8("[\u8C03\u8BD5] \u5F3A\u5236=%d \u5B50\u76EE\u5F55=%d", task->force, task->recursive);
+
     int count = batch_sign(task->target, task->pfx,
                            task->password[0] ? task->password : NULL,
                            task->ts_url[0]   ? task->ts_url : NULL,
