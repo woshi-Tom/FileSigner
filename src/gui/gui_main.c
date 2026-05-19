@@ -311,7 +311,7 @@ static void
 create_cert_page(HWND parent)
 {
     g_hPageCert = CreateWindowExW(0, L"STATIC", L"",
-                                   WS_CHILD,
+                                   WS_CHILD | WS_VISIBLE,
                                    PAD, 40, W_CLIENT - 2*PAD, PAGE_H,
                                    parent, NULL, g_hInst, NULL);
 
