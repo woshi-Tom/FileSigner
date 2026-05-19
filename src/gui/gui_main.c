@@ -402,8 +402,12 @@ static void create_sign_page(HWND parent)
             0, y, W_EDIT - 90, 250,
             g_hPageSign, (HMENU)(INT_PTR)IDC_COMBO_TIMESTAMP, g_hInst, NULL);
         if (hCombo) {
-            for (int i = 0; i < TSA_SERVER_COUNT; i++)
-                SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)g_tsa_servers[i].url);
+            wchar_t wurl[256];
+            for (int i = 0; i < TSA_SERVER_COUNT; i++) {
+                MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].url, -1,
+                                    wurl, 256);
+                SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)wurl);
+            }
             SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
         }
     }
