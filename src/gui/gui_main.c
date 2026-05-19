@@ -250,9 +250,8 @@ create_sign_page(HWND parent)
               0, y, W_CLIENT - 2*PAD, 2, 0);
     y += 10;
 
-    HWND hBtnSign = make_ctrl(g_hPageSign, L"BUTTON", L"\u5F00\u59CB\u7B7E\u540D",
-                               BS_DEFPUSHBUTTON, 0, y, 130, EH + 4, IDC_BTN_SIGN);
-    SetWindowFont(hBtnSign, g_hFont, TRUE);
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u5F00\u59CB\u7B7E\u540D",
+              BS_DEFPUSHBUTTON, 0, y, 130, EH + 4, IDC_BTN_SIGN);
     y += EH + 4 + 10;
 
     g_hProgress = make_ctrl(g_hPageSign, PROGRESS_CLASSW, L"",
