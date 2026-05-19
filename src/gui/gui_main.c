@@ -167,6 +167,8 @@ apply_font(HWND parent)
     EnumChildWindows(parent, (WNDENUMPROC)set_font_cb, 0);
 }
 
+static int g_debug;
+
 /* ---------------------------------------------------------------- */
 /* Sign page                                                        */
 /* ---------------------------------------------------------------- */
@@ -241,9 +243,11 @@ create_sign_page(HWND parent)
     y += EH + 8;
 
     make_ctrl(g_hPageSign, L"BUTTON", L"\u5305\u542B\u5B50\u76EE\u5F55",
-              BS_AUTOCHECKBOX, 4, y, 200, LH, IDC_CHK_RECURSIVE);
+              BS_AUTOCHECKBOX, 4, y, 150, LH, IDC_CHK_RECURSIVE);
     make_ctrl(g_hPageSign, L"BUTTON", L"\u5F3A\u5236\u91CD\u65B0\u7B7E\u540D",
-              BS_AUTOCHECKBOX, 220, y, 180, LH, IDC_CHK_FORCE);
+              BS_AUTOCHECKBOX, 170, y, 180, LH, IDC_CHK_FORCE);
+    make_ctrl(g_hPageSign, L"BUTTON", L"\u8C03\u8BD5\u65E5\u5FD7",
+              BS_AUTOCHECKBOX, 360, y, 120, LH, 216);
     y += LH + 12;
 
     make_ctrl(g_hPageSign, L"STATIC", L"", SS_ETCHEDHORZ,
@@ -447,7 +451,8 @@ page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
               UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
     (void)uIdSubclass; (void)dwRefData;
-    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORLISTBOX)
+    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORLISTBOX
+        || msg == WM_DRAWITEM || msg == WM_MEASUREITEM)
         return SendMessageW(GetParent(hwnd), msg, wp, lp);
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
@@ -735,6 +740,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             int recursive = IsDlgButtonChecked(g_hPageSign, IDC_CHK_RECURSIVE) == BST_CHECKED;
             int force     = IsDlgButtonChecked(g_hPageSign, IDC_CHK_FORCE) == BST_CHECKED;
+            g_debug       = IsDlgButtonChecked(g_hPageSign, 216) == BST_CHECKED;
 
             SignTask *task = calloc(1, sizeof(SignTask));
             if (!task) break;
@@ -751,6 +757,8 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
             SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
             log_message(LOG_COLOR_INFO, L"\u5F00\u59CB\u7B7E\u540D...");
+            if (g_debug)
+                log_message(LOG_COLOR_INFO, L"\u8C03\u8BD5\u65E5\u5FD7\u5DF2\u5F00\u542F");
 
             g_hThread = CreateThread(NULL, 0, sign_thread_proc, task, 0, NULL);
             if (!g_hThread) {
