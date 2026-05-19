@@ -122,6 +122,21 @@ wide_to_utf8(const wchar_t *src, char *dst, int dst_chars)
 }
 
 static void
+log_scroll_bottom(void)
+{
+    int count = (int)SendMessageW(g_hLog, LB_GETCOUNT, 0, 0);
+    if (count <= 0) return;
+    RECT rc;
+    GetClientRect(g_hLog, &rc);
+    int itemH = (int)SendMessageW(g_hLog, LB_GETITEMHEIGHT, 0, 0);
+    if (itemH <= 0) itemH = 16;
+    int visible = rc.bottom / itemH;
+    int top = count - visible;
+    if (top < 0) top = 0;
+    SendMessageW(g_hLog, LB_SETTOPINDEX, top, 0);
+}
+
+static void
 log_message(int color, const wchar_t *fmt, ...)
 {
     wchar_t buf[2048];
@@ -131,7 +146,7 @@ log_message(int color, const wchar_t *fmt, ...)
     va_end(args);
     int idx = (int)SendMessageW(g_hLog, LB_ADDSTRING, 0, (LPARAM)buf);
     SendMessageW(g_hLog, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)color);
-    SendMessageW(g_hLog, LB_SETTOPINDEX, idx, 0);
+    log_scroll_bottom();
 }
 
 static HWND
@@ -798,13 +813,13 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 DWORD elapsed = GetTickCount() - t0;
 
                 if (ok) {
-                    log_message(LOG_COLOR_OK, L"    \u2713 %s \u2014 %lu ms", wlabel, elapsed);
+                    log_message(LOG_COLOR_OK, L"    \u2714 %lu ms", elapsed);
                     if (best_idx < 0 || (int)elapsed < best_latency) {
                         best_idx = i;
                         best_latency = (int)elapsed;
                     }
                 } else {
-                    log_message(LOG_COLOR_FAIL, L"    \u2717 %s \u2014 \u4E0D\u53EF\u8FBE", wlabel);
+                    log_message(LOG_COLOR_FAIL, L"    \u2718 N/A");
                 }
                 UpdateWindow(g_hLog);
             }
