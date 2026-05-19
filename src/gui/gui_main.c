@@ -135,13 +135,6 @@ log_message(int color, const wchar_t *fmt, ...)
 }
 
 static HWND
-make_edit(HWND parent, const wchar_t *text, int x, int y, int w, int id)
-{
-    return make_ctrl(parent, L"EDIT", text,
-                     WS_BORDER | ES_AUTOHSCROLL, x, y, w, EH, id);
-}
-
-static HWND
 make_ctrl(HWND parent, const wchar_t *cls, const wchar_t *text,
           DWORD style, int x, int y, int w, int ht, int id)
 {
@@ -151,6 +144,13 @@ make_ctrl(HWND parent, const wchar_t *cls, const wchar_t *text,
                                parent, (HMENU)(INT_PTR)id, g_hInst, NULL);
     SendMessageW(hw, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     return hw;
+}
+
+static HWND
+make_edit(HWND parent, const wchar_t *text, int x, int y, int w, int id)
+{
+    return make_ctrl(parent, L"EDIT", text,
+                     WS_BORDER | ES_AUTOHSCROLL, x, y, w, EH, id);
 }
 
 static BOOL CALLBACK
@@ -919,7 +919,7 @@ gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (!g_hwndMain) { OleUninitialize(); return 1; }
 
     ShowWindow(g_hwndMain, nCmdShow ? nCmdShow : SW_SHOWDEFAULT);
-    UpdateWindow(hwnd);
+    UpdateWindow(g_hwndMain);
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
