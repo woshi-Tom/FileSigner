@@ -25,7 +25,8 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 {
     (void)uIdSubclass; (void)dwRefData;
     /* Forward messages that need custom handling to main window */
-    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORLISTBOX) {
+    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORLISTBOX
+        || msg == WM_DRAWITEM || msg == WM_CTLCOLORBTN) {
         return SendMessageW(GetParent(hwnd), msg, wp, lp);
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
@@ -247,7 +248,8 @@ static COLORREF g_clrBg            = RGB(244, 245, 248);  /* #F4F5F8 warm off-wh
 static COLORREF g_clrLogBg         = RGB(34, 35, 38);     /* #222326 dark warm */
 static COLORREF g_clrLogText       = RGB(232, 233, 237);  /* #E8E9ED light gray */
 static COLORREF g_clrAccent        = RGB(94, 106, 210);   /* #5E6AD2 slate blue-violet */
-static COLORREF g_clrAccentHover   = RGB(107, 117, 217);  /* #6B75D9 lighter */
+static COLORREF g_clrAccentHover   = RGB(120, 130, 224);  /* #7882E0 lighter hover */
+static COLORREF g_clrAccentDark    = RGB(75, 85, 178);    /* #4B55B2 pressed */
 static COLORREF g_clrText          = RGB(43, 43, 47);     /* #2B2B2F soft near-black */
 static COLORREF g_clrLabel         = RGB(100, 104, 112);  /* muted gray */
 static COLORREF g_clrEditBg        = RGB(255, 255, 255);  /* white */
@@ -446,7 +448,7 @@ static void create_sign_page(HWND parent)
 
     /* Sign button */
     make_ctrl(g_hPageSign, L"BUTTON", L"开始签名",
-              BS_DEFPUSHBUTTON, 0, y, W_BTN_SIGN, EH + 4, IDC_BTN_SIGN);
+              BS_OWNERDRAW, 0, y, W_BTN_SIGN, EH + 4, IDC_BTN_SIGN);
     y += EH + 4 + 8;
 
     /* Progress bar */
@@ -554,7 +556,7 @@ static void create_cert_page(HWND parent)
 
     /* Generate button */
     make_ctrl(g_hPageCert, L"BUTTON", L"生成证书",
-              BS_DEFPUSHBUTTON, 0, y, W_BTN_GEN, EH + 4, IDC_BTN_GENERATE);
+              BS_OWNERDRAW, 0, y, W_BTN_GEN, EH + 4, IDC_BTN_GENERATE);
     y += EH + 4 + 10;
 
     /* Status label */
@@ -694,21 +696,52 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return (LRESULT)g_hbrEditBg;
     }
 
-    case WM_CTLCOLORBTN:
+    case WM_DRAWITEM:
     {
-        HDC hdc = (HDC)wParam;
-        HWND hCtrl = (HWND)lParam;
-        int id = GetDlgCtrlID(hCtrl);
-        /* Primary action buttons: accent blue bg + white text */
-        if (id == IDC_BTN_SIGN || id == IDC_BTN_GENERATE) {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lParam;
+        if (dis->CtlType == ODT_BUTTON &&
+            (dis->CtlID == IDC_BTN_SIGN || dis->CtlID == IDC_BTN_GENERATE)) {
+            HDC hdc = dis->hDC;
+            RECT rc = dis->rcItem;
+            BOOL isPressed = (dis->itemState & ODS_SELECTED);
+            BOOL isHot     = (dis->itemState & ODS_HOTLIGHT);
+            BOOL isFocused = (dis->itemState & ODS_FOCUS);
+
+            /* Background: accent → lighter on hover → darker on press */
+            COLORREF bg = isPressed ? g_clrAccentDark
+                        : isHot     ? g_clrAccentHover
+                                    : g_clrAccent;
+            HBRUSH hbr = CreateSolidBrush(bg);
+            FillRect(hdc, &rc, hbr);
+            DeleteObject(hbr);
+
+            /* 1px subtle border */
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB(80, 90, 190));
+            HPEN oldPen = SelectObject(hdc, pen);
+            HBRUSH oldBr = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+            SelectObject(hdc, oldBr);
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+
+            /* Text: white, centered, semibold font */
+            wchar_t text[64];
+            GetWindowTextW(dis->hwndItem, text, 64);
+            SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, RGB(255, 255, 255));
-            SetBkColor(hdc, g_clrAccent);
-            return (LRESULT)g_hbrAccent;
+            SelectObject(hdc, g_hFont);
+            DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            /* Focus rect */
+            if (isFocused) {
+                RECT fr = rc;
+                fr.left   += 3; fr.top    += 3;
+                fr.right  -= 3; fr.bottom -= 3;
+                DrawFocusRect(hdc, &fr);
+            }
+            return TRUE;
         }
-        /* Default button background for others */
-        SetTextColor(hdc, g_clrText);
-        SetBkColor(hdc, g_clrBg);
-        return (LRESULT)g_hbrBg;
+        break;
     }
 
     case WM_CTLCOLORLISTBOX:
