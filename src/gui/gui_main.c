@@ -50,6 +50,7 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 #define IDC_CHK_DEBUG       214
 #define IDC_COMBO_TIMESTAMP 215
 #define IDC_BTN_TEST_TSA    216
+#define IDC_LBL_LOG_TITLE   217
 #define IDC_PROGRESS        212
 #define IDC_LIST_LOG        213
 
@@ -62,6 +63,7 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 #define IDC_EDIT_CERT_PW    306
 #define IDC_EDIT_CERT_CN    307
 #define IDC_EDIT_CERT_EMAIL 308
+#define IDC_LBL_CERT_TITLE  309
 
 /* Worker-thread support: custom messages and task struct */
 #define WM_APP_LOG          (WM_APP + 1)
@@ -227,6 +229,7 @@ static DWORD WINAPI sign_thread_proc(LPVOID param)
 
 static HINSTANCE g_hInst;
 static HFONT g_hFont;
+static HFONT g_hFontSection;
 static HFONT g_hMonoFont;
 static HWND g_hTab;
 static HWND g_hPageSign, g_hPageCert;
@@ -239,17 +242,19 @@ static HBRUSH g_hbrBg;             /* main background */
 static HBRUSH g_hbrLogBg;          /* log area dark background */
 static HBRUSH g_hbrEditBg;         /* edit control background */
 static HBRUSH g_hbrBtnFace;        /* button/checkbox background */
-static COLORREF g_clrBg            = RGB(245, 247, 250);  /* light blue-gray */
-static COLORREF g_clrLogBg         = RGB(30, 30, 40);     /* dark background */
-static COLORREF g_clrLogText       = RGB(200, 220, 255);  /* light blue text */
-static COLORREF g_clrAccent        = RGB(0, 120, 215);    /* Windows blue */
-static COLORREF g_clrAccentHover   = RGB(0, 140, 240);    /* lighter blue hover */
-static COLORREF g_clrText          = RGB(30, 30, 30);     /* dark text */
-static COLORREF g_clrLabel         = RGB(60, 60, 70);     /* label text */
+static HBRUSH g_hbrAccent;         /* accent color for primary buttons */
+static COLORREF g_clrBg            = RGB(244, 245, 248);  /* #F4F5F8 warm off-white */
+static COLORREF g_clrLogBg         = RGB(34, 35, 38);     /* #222326 dark warm */
+static COLORREF g_clrLogText       = RGB(232, 233, 237);  /* #E8E9ED light gray */
+static COLORREF g_clrAccent        = RGB(94, 106, 210);   /* #5E6AD2 slate blue-violet */
+static COLORREF g_clrAccentHover   = RGB(107, 117, 217);  /* #6B75D9 lighter */
+static COLORREF g_clrText          = RGB(43, 43, 47);     /* #2B2B2F soft near-black */
+static COLORREF g_clrLabel         = RGB(100, 104, 112);  /* muted gray */
 static COLORREF g_clrEditBg        = RGB(255, 255, 255);  /* white */
-static COLORREF g_clrLogOK         = RGB(80, 200, 120);   /* green for [OK] */
-static COLORREF g_clrLogFail       = RGB(240, 80, 80);    /* red for [FAIL] */
-static COLORREF g_clrLogSkip       = RGB(180, 180, 190);  /* gray for [SKIP] */
+static COLORREF g_clrLogOK         = RGB(74, 222, 128);   /* #4ADE80 fresh green */
+static COLORREF g_clrLogFail       = RGB(248, 113, 113);  /* #F87171 soft red */
+static COLORREF g_clrLogSkip       = RGB(155, 155, 173);  /* #9B9BAD muted */
+static COLORREF g_clrBorder        = RGB(208, 214, 224);  /* #D0D6E0 soft border */
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -451,7 +456,7 @@ static void create_sign_page(HWND parent)
 
     /* Log section title */
     make_ctrl(g_hPageSign, L"STATIC", L"  日志输出",
-              SS_LEFT, 0, y, 300, LH + 2, 0);
+              SS_LEFT, 0, y, 300, LH + 2, IDC_LBL_LOG_TITLE);
     y += LH + 3;
 
     /* Log listbox */
@@ -490,7 +495,7 @@ static void create_cert_page(HWND parent)
 
     /* Section header */
     make_ctrl(g_hPageCert, L"STATIC", L"  证书生成",
-              SS_LEFT, 0, y, 300, LH + 2, 0);
+              SS_LEFT, 0, y, 300, LH + 2, IDC_LBL_CERT_TITLE);
     y += LH + 8;
 
     /* Description */
@@ -640,7 +645,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
             SendMessageW(g_hProgress, PBM_SETBARCOLOR, 0, (LPARAM)g_clrAccent);
-            SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, (LPARAM)RGB(220, 225, 232));
+            SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, (LPARAM)g_clrBorder);
 
             return 0;
         }
@@ -649,11 +654,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     {
         HDC hdc = (HDC)wParam;
         HWND hCtrl = (HWND)lParam;
+        /* Page panels → white card background */
+        if (hCtrl == g_hPageSign || hCtrl == g_hPageCert) {
+            SetTextColor(hdc, g_clrText);
+            SetBkColor(hdc, g_clrEditBg);
+            return (LRESULT)g_hbrEditBg;
+        }
         /* Dark bg for log listbox (it sends CTLCOLORSTATIC too) */
         if (hCtrl == g_hLog) {
             SetTextColor(hdc, g_clrLogText);
             SetBkColor(hdc, g_clrLogBg);
             return (LRESULT)g_hbrLogBg;
+        }
+        /* Children of page panels — match white card bg */
+        HWND hParent = GetParent(hCtrl);
+        if (hParent == g_hPageSign || hParent == g_hPageCert) {
+            int id = GetDlgCtrlID(hCtrl);
+            /* Section headers → accent color + semibold font */
+            if (id == IDC_LBL_LOG_TITLE || id == IDC_LBL_CERT_TITLE) {
+                SetTextColor(hdc, g_clrAccent);
+                SetBkColor(hdc, g_clrEditBg);
+                SelectObject(hdc, g_hFontSection);
+                return (LRESULT)g_hbrEditBg;
+            }
+            SetTextColor(hdc, g_clrText);
+            SetBkColor(hdc, g_clrEditBg);
+            return (LRESULT)g_hbrEditBg;
         }
         /* Light background for all other static controls */
         SetTextColor(hdc, g_clrText);
@@ -666,6 +692,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         HDC hdc = (HDC)wParam;
         SetBkColor(hdc, g_clrEditBg);
         return (LRESULT)g_hbrEditBg;
+    }
+
+    case WM_CTLCOLORBTN:
+    {
+        HDC hdc = (HDC)wParam;
+        HWND hCtrl = (HWND)lParam;
+        int id = GetDlgCtrlID(hCtrl);
+        /* Primary action buttons: accent blue bg + white text */
+        if (id == IDC_BTN_SIGN || id == IDC_BTN_GENERATE) {
+            SetTextColor(hdc, RGB(255, 255, 255));
+            SetBkColor(hdc, g_clrAccent);
+            return (LRESULT)g_hbrAccent;
+        }
+        /* Default button background for others */
+        SetTextColor(hdc, g_clrText);
+        SetBkColor(hdc, g_clrBg);
+        return (LRESULT)g_hbrBg;
     }
 
     case WM_CTLCOLORLISTBOX:
@@ -694,7 +737,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         /* Thin line below tab area */
         RECT line = { PAD, PAGE_TOP - 2, rc.right - PAD, PAGE_TOP - 1 };
-        HBRUSH hbrLine = CreateSolidBrush(RGB(210, 215, 222));
+        HBRUSH hbrLine = CreateSolidBrush(g_clrBorder);
         FillRect(hdc, &line, hbrLine);
         DeleteObject(hbrLine);
 
@@ -728,7 +771,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 RECT rc = nmc->nmcd.rc;
 
                 /* Fill background */
-                COLORREF bg = isSel ? g_clrBg : RGB(230, 234, 240);
+                COLORREF bg = isSel ? g_clrEditBg : RGB(234, 235, 240);
                 HBRUSH hbr = CreateSolidBrush(bg);
                 FillRect(nmc->nmcd.hdc, &rc, hbr);
                 DeleteObject(hbr);
@@ -751,7 +794,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SendMessageW(g_hTab, TCM_GETITEMW, nmc->nmcd.dwItemSpec, (LPARAM)&tci);
 
                 SetBkMode(nmc->nmcd.hdc, TRANSPARENT);
-                SetTextColor(nmc->nmcd.hdc, isSel ? g_clrAccent : RGB(100, 100, 110));
+                SetTextColor(nmc->nmcd.hdc, isSel ? g_clrAccent : g_clrLabel);
                 SelectObject(nmc->nmcd.hdc, g_hFont);
                 DrawTextW(nmc->nmcd.hdc, tabText, -1, &rc,
                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -1041,20 +1084,29 @@ int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_hInst = hInstance;
     (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
 
-    /* Create font */
-    g_hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+    /* Create fonts */
+    g_hFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                             GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                             0, L"Microsoft YaHei UI");
     if (!g_hFont)
-        g_hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        g_hFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                               DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                               0, L"Segoe UI");
+    /* Section header font — slightly larger, semibold */
+    g_hFontSection = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+                                  GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                                  0, L"Microsoft YaHei UI");
+    if (!g_hFontSection)
+        g_hFontSection = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+                                      DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                                      0, L"Segoe UI");
 
     /* Create brushes for custom colors */
     g_hbrBg     = CreateSolidBrush(g_clrBg);
     g_hbrLogBg  = CreateSolidBrush(g_clrLogBg);
     g_hbrEditBg = CreateSolidBrush(g_clrEditBg);
     g_hbrBtnFace = CreateSolidBrush(g_clrBg);
+    g_hbrAccent  = CreateSolidBrush(g_clrAccent);
 
     /* Register window class */
     memset(&wc, 0, sizeof(wc));
@@ -1094,11 +1146,13 @@ int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Cleanup */
     DeleteObject(g_hFont);
+    if (g_hFontSection) DeleteObject(g_hFontSection);
     if (g_hMonoFont) DeleteObject(g_hMonoFont);
     DeleteObject(g_hbrBg);
     DeleteObject(g_hbrLogBg);
     DeleteObject(g_hbrEditBg);
     DeleteObject(g_hbrBtnFace);
+    DeleteObject(g_hbrAccent);
     CoUninitialize();
     return (int)msg.wParam;
 }
