@@ -380,7 +380,7 @@ static void create_sign_page(HWND parent)
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_TARGET);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_TGT);
+              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_TGT);
     y += EH + 6;
 
     /* PFX */
@@ -389,7 +389,7 @@ static void create_sign_page(HWND parent)
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_PFX);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_PFX);
+              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_PFX);
     y += EH + 6;
 
     /* Password */
@@ -419,7 +419,7 @@ static void create_sign_page(HWND parent)
         }
     }
     make_ctrl(g_hPageSign, L"BUTTON", L"测速",
-              BS_FLAT, W_EDIT - 86, y, 80, EH, IDC_BTN_TEST_TSA);
+              0, W_EDIT - 86, y, 80, EH, IDC_BTN_TEST_TSA);
     y += EH + 6;
 
     /* Output dir */
@@ -428,7 +428,7 @@ static void create_sign_page(HWND parent)
     make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_OUTDIR);
     make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_OUT);
+              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_OUT);
     y += EH + 8;
 
     /* Checkboxes */
@@ -514,7 +514,7 @@ static void create_cert_page(HWND parent)
               WS_BORDER | ES_AUTOHSCROLL,
               0, y, W_EDIT, EH, IDC_EDIT_CERT_DIR);
     make_ctrl(g_hPageCert, L"BUTTON", L"浏览...",
-              BS_FLAT, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_CD);
+              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_CD);
     y += EH + 8;
 
     /* Validity days */
