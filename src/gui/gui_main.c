@@ -16,6 +16,17 @@
 #include "file_utils.h"
 #include "resource.h"
 
+/* Enable modern Common Controls 6.0 theming (MSVC) */
+#if defined(_MSC_VER)
+#pragma comment(linker, \
+    "/manifestdependency:\"type='win32' " \
+    "name='Microsoft.Windows.Common-Controls' " \
+    "version='6.0.0.0' " \
+    "processorArchitecture='*' " \
+    "publicKeyToken='6595b64144ccf1df' " \
+    "language='*'\"")
+#endif
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
 
