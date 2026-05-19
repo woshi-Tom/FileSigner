@@ -1,1204 +1,517 @@
-#ifdef _WIN32
+/* gui_main.c — Pure C11 Sciter GUI for FileSigner
+ *
+ * Registers native functions on the view's expando (SciterGetViewExpando + 
+ * ValueNativeFunctorSet), no C++ or sciter::window needed.
+ */
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <commdlg.h>
 #include <shlobj.h>
-#include <commctrl.h>
+#include <shellapi.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <stdarg.h>
+#include <string.h>
 
-#include "cert_gen.h"
-#include "authenticode.h"
-#include "timestamp.h"
-#include "batch_signer.h"
-#include "file_utils.h"
+#define _CRT_SECURE_NO_WARNINGS
+#include "sciter-x.h"
 #include "resource.h"
 
-/* Enable modern Common Controls 6.0 theming (MSVC) */
-#if defined(_MSC_VER)
-#pragma comment(linker, \
-    "/manifestdependency:\"type='win32' " \
-    "name='Microsoft.Windows.Common-Controls' " \
-    "version='6.0.0.0' " \
-    "processorArchitecture='*' " \
-    "publicKeyToken='6595b64144ccf1df' " \
-    "language='*'\"")
-#endif
+#include "batch_signer.h"
+#include "cert_gen.h"
+#include "timestamp.h"
 
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "ole32.lib")
+/* ----------------------------------------------------------------- */
+/* Constants                                                         */
+/* ----------------------------------------------------------------- */
 
-/* Subclass procedure for page panels (STATIC) — forward WM_COMMAND to main window */
-static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-                                      UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+#define WM_SCITER_EVAL  (WM_APP + 100)
+#define MAX_STR         1024
+
+/* ----------------------------------------------------------------- */
+/* Globals                                                           */
+/* ----------------------------------------------------------------- */
+
+static HWND g_hwnd = NULL;   /* main Sciter window (HWINDOW == HWND) */
+
+/* ----------------------------------------------------------------- */
+/* VALUE helpers                                                     */
+/* ----------------------------------------------------------------- */
+
+static int
+val_to_int(const VALUE *v, int fallback)
 {
-    (void)uIdSubclass; (void)dwRefData;
-    /* Forward messages that need custom handling to main window */
-    if (msg == WM_COMMAND || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORLISTBOX
-        || msg == WM_DRAWITEM || msg == WM_CTLCOLORBTN) {
-        return SendMessageW(GetParent(hwnd), msg, wp, lp);
-    }
-    return DefSubclassProc(hwnd, msg, wp, lp);
+    INT val = 0;
+    return (ValueIntData(v, &val) == HV_OK) ? (int)val : fallback;
 }
 
-/* ------------------------------------------------------------------ */
-/* Control IDs                                                         */
-/* ------------------------------------------------------------------ */
+/* Copy VALUE string into a UTF-8 buffer; returns bytes written. */
+static int
+val_to_utf8(const VALUE *v, char *buf, int size)
+{
+    LPCWSTR ws;
+    UINT    nchars;
 
-#define IDC_TAB             100
-#define IDC_EDIT_TARGET     201
-#define IDC_BTN_BROWSE_TGT  202
-#define IDC_EDIT_PFX        203
-#define IDC_BTN_BROWSE_PFX  204
-#define IDC_EDIT_PASSWORD   205
-#define IDC_EDIT_TIMESTAMP  206
-#define IDC_CHK_RECURSIVE   207
-#define IDC_CHK_FORCE       208
-#define IDC_EDIT_OUTDIR     209
-#define IDC_BTN_BROWSE_OUT  210
-#define IDC_BTN_SIGN        211
-#define IDC_CHK_DEBUG       214
-#define IDC_COMBO_TIMESTAMP 215
-#define IDC_BTN_TEST_TSA    216
-#define IDC_LBL_LOG_TITLE   217
-#define IDC_PROGRESS        212
-#define IDC_LIST_LOG        213
+    buf[0] = '\0';
+    if (ValueStringData(v, &ws, &nchars) != HV_OK || !ws || nchars == 0)
+        return 0;
 
-/* Restore certificate page control IDs (were removed) */
-#define IDC_EDIT_CERT_DIR   301
-#define IDC_BTN_BROWSE_CD   302
-#define IDC_EDIT_CERT_DAYS  303
-#define IDC_BTN_GENERATE    304
-#define IDC_LBL_CERT_STATUS 305
-#define IDC_EDIT_CERT_PW    306
-#define IDC_EDIT_CERT_CN    307
-#define IDC_EDIT_CERT_EMAIL 308
-#define IDC_LBL_CERT_TITLE  309
+    int n = WideCharToMultiByte(CP_UTF8, 0, ws, (int)nchars,
+                                 buf, size - 1, NULL, NULL);
+    if (n > 0) buf[n] = '\0';
+    else       buf[0] = '\0';
+    return n;
+}
 
-/* Worker-thread support: custom messages and task struct */
-#define WM_APP_LOG          (WM_APP + 1)
-#define WM_APP_PROGRESS     (WM_APP + 2)
-#define WM_APP_SIGN_DONE    (WM_APP + 3)
+/* ----------------------------------------------------------------- */
+/* Thread-safe script eval — posts to main thread via custom msg      */
+/* ----------------------------------------------------------------- */
 
-/* Forward declarations for helper functions defined later */
-static void wide_from_utf8(const char *src, wchar_t *dst, int dst_chars);
-static void wide_to_utf8(const wchar_t *src, char *dst, int dst_chars);
+static void
+ui_eval_async(const char *utf8)
+{
+    if (!g_hwnd) return;
 
-/* Path buffer size — must match MAX_PATH_LEN in file_utils.h */
-#define GUI_PATH_LEN    4096
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (wlen <= 0) return;
 
+    LPWSTR ws = (LPWSTR)malloc((size_t)wlen * sizeof(WCHAR));
+    if (!ws) return;
+
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, ws, wlen);
+    PostMessageW(g_hwnd, WM_SCITER_EVAL, 0, (LPARAM)ws);
+}
+
+/* Escape a UTF-8 string for embedding in a TIScript double-quoted literal. */
+static void
+escape_js_string(const char *src, char *dst, size_t dst_size)
+{
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j < dst_size - 6; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\\')       { dst[j++] = '\\'; dst[j++] = '\\'; }
+        else if (c == '"')   { dst[j++] = '\\'; dst[j++] = '"'; }
+        else if (c == '\n')  { dst[j++] = '\\'; dst[j++] = 'n'; }
+        else if (c == '\r')  { }
+        else if (c < 0x20)   { }
+        else                 { dst[j++] = (char)c; }
+    }
+    dst[j] = '\0';
+}
+
+/* ----------------------------------------------------------------- */
+/* Batch-sign progress callback (worker thread)                      */
+/* ----------------------------------------------------------------- */
+
+static void
+batch_progress(const char *filename, int current, int total,
+               int success, void *user_data)
+{
+    (void)user_data;
+    char buf[2048], esc[1024];
+
+    int pct = (total > 0) ? (current * 100) / total : 0;
+    snprintf(buf, sizeof(buf), "onProgress(%d)", pct);
+    ui_eval_async(buf);
+
+    escape_js_string(filename, esc, sizeof(esc));
+    snprintf(buf, sizeof(buf), "onLog(\"%s\",\"%s\")",
+             esc, success ? "ok" : "fail");
+    ui_eval_async(buf);
+}
+
+/* Parameters passed to the worker thread. */
 typedef struct {
-    HWND hwnd; /* main window to post messages to */
-    char target[GUI_PATH_LEN];
-    char pfx[GUI_PATH_LEN];
+    char target[MAX_PATH];
+    char pfx[MAX_PATH];
     char password[256];
-    char ts_url[512];
-    char outdir[GUI_PATH_LEN];
-    int recursive;
-    int force;
-    int debug;
-} SignTask;
+    char tsa_url[512];
+    char outdir[MAX_PATH];
+    int  recursive;
+    int  force;
+    int  debug;
+} SignParams;
 
-static void post_log_wstr(HWND hwnd, const wchar_t *wmsg)
+static DWORD WINAPI
+sign_worker(LPVOID param)
 {
-    if (!wmsg) return;
-    size_t len = wcslen(wmsg) + 1;
-    wchar_t *copy = (wchar_t *)malloc(len * sizeof(wchar_t));
-    if (!copy) return;
-    wcscpy(copy, wmsg);
-    if (!PostMessageW(hwnd, WM_APP_LOG, 0, (LPARAM)copy))
-        free(copy);
-}
+    SignParams *p = (SignParams *)param;
 
-static void post_log_utf8(HWND hwnd, const char *fmt, ...)
-{
-    char buf[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    wchar_t wbuf[1024];
-    wide_from_utf8(buf, wbuf, (int)(sizeof(wbuf)/sizeof(wchar_t)));
-    post_log_wstr(hwnd, wbuf);
-}
+    int count = batch_sign(p->target, p->pfx,
+                           p->password[0] ? p->password : NULL,
+                           p->tsa_url[0]  ? p->tsa_url  : NULL,
+                           p->outdir[0]   ? p->outdir   : NULL,
+                           p->force, p->recursive,
+                           batch_progress, NULL);
 
-static void post_progress(HWND hwnd, int percent)
-{
-    PostMessageW(hwnd, WM_APP_PROGRESS, (WPARAM)percent, 0);
-}
+    char buf[128];
+    snprintf(buf, sizeof(buf), "onSignComplete(%d)", count);
+    ui_eval_async(buf);
 
-/* Thread callbacks passed to core signing APIs */
-static void thread_status_cb(const char *status, void *user_data)
-{
-    SignTask *task = (SignTask *)user_data;
-    if (!task || !status) return;
-    wchar_t wstatus[512];
-    wide_from_utf8(status, wstatus, 512);
-    post_log_wstr(task->hwnd, wstatus);
-}
-
-static void thread_progress_cb(const char *filename, int current, int total,
-                               int success, void *user_data)
-{
-    SignTask *task = (SignTask *)user_data;
-    if (!task || !filename) return;
-    if (total > 0) {
-        int percent = (int)(current * 100 / total);
-        post_progress(task->hwnd, percent);
-    }
-    wchar_t wfilename[GUI_PATH_LEN];
-    wide_from_utf8(filename, wfilename, GUI_PATH_LEN);
-
-    if (success == 1) {
-        wchar_t msg[GUI_PATH_LEN + 64];
-        wsprintfW(msg, L"[OK] %s", wfilename);
-        post_log_wstr(task->hwnd, msg);
-    } else if (success == -2) {
-        wchar_t msg[GUI_PATH_LEN + 64];
-        wsprintfW(msg, L"[跳过] %s (已签名，请勾选\"强制重新签名\")", wfilename);
-        post_log_wstr(task->hwnd, msg);
-    } else if (success == -3) {
-        post_log_wstr(task->hwnd, wfilename);
-    } else if (success == -4) {
-        wchar_t msg[GUI_PATH_LEN + 64];
-        wsprintfW(msg, L"  %s", wfilename);
-        post_log_wstr(task->hwnd, msg);
-    } else if (success == 0) {
-        wchar_t msg[GUI_PATH_LEN + 64];
-        wsprintfW(msg, L"[失败] %s", wfilename);
-        post_log_wstr(task->hwnd, msg);
-    }
-}
-
-static DWORD WINAPI sign_thread_proc(LPVOID param)
-{
-    SignTask *task = (SignTask *)param;
-    if (!task) return 0;
-
-    HWND hwnd = task->hwnd;
-    int count = 0;
-    int crashed = 0;
-
-    __try {
-        if (directory_exists(task->target)) {
-            post_log_utf8(hwnd, "开始批量签名...");
-            if (task->outdir[0] && !directory_exists(task->outdir)) create_directory(task->outdir);
-            count = batch_sign(task->target, task->pfx, task->password[0] ? task->password : NULL,
-                                task->ts_url[0] ? task->ts_url : NULL,
-                                task->outdir[0] ? task->outdir : NULL,
-                                task->force, task->recursive,
-                                thread_progress_cb, task);
-        } else if (file_exists(task->target)) {
-            post_log_utf8(hwnd, "正在签名: %s", task->target);
-            if (authenticode_sign(task->target, task->pfx, task->password[0] ? task->password : NULL,
-                                   task->ts_url[0] ? task->ts_url : NULL,
-                                   task->outdir[0] ? task->outdir : task->target,
-                                   thread_status_cb, task)) {
-                count = 1;
-                post_log_utf8(hwnd, "[OK] 签名完成");
-            } else {
-                post_log_utf8(hwnd, "[FAIL] 签名失败");
-            }
-            post_progress(hwnd, 100);
-        } else {
-            wchar_t wmsg[GUI_PATH_LEN + 64];
-            wchar_t wtarget[GUI_PATH_LEN];
-            wide_from_utf8(task->target, wtarget, GUI_PATH_LEN);
-            wsprintfW(wmsg, L"错误: 目标不存在: %s", wtarget);
-            post_log_wstr(hwnd, wmsg);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        crashed = 1;
-        post_log_utf8(hwnd, "[CRASH] 签名过程发生异常 (错误码: 0x%08X)", GetExceptionCode());
-        post_log_utf8(hwnd, "可能原因: 文件损坏、内存不足、或 OpenSSL 内部错误");
-    }
-
-    free(task);
-    PostMessageW(hwnd, WM_APP_SIGN_DONE, (WPARAM)(crashed ? -1 : count), 0);
+    free(p);
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Layout constants */
-#define PAD             14      /* outer padding */
-#define GAP             10      /* vertical gap between groups */
-#define LH              18      /* label height */
-#define EH              28      /* edit/button height */
-#define W_CLIENT        600     /* client width */
-#define W_EDIT          460     /* edit box width */
-#define W_BROWSE        84      /* browse button width */
-#define W_BTN_SIGN      130     /* sign button width */
-#define PAGE_H          620     /* page panel height */
-#define W_BTN_GEN       160     /* generate button width */
-#define PAGE_TOP        42      /* top offset for page content */
-#define TAB_H           32      /* tab control height */
+/* ----------------------------------------------------------------- */
+/* Native functor: start_sign(target, pfx, password, tsa_url,        */
+/*                            outdir, recursive, force, debug)        */
+/* Spawns a worker thread, returns immediately.                      */
+/* ----------------------------------------------------------------- */
 
-/* ------------------------------------------------------------------ */
-/* Globals                                                             */
-/* ------------------------------------------------------------------ */
-
-static HINSTANCE g_hInst;
-static HFONT g_hFont;
-static HFONT g_hFontSection;
-static HFONT g_hMonoFont;
-static HWND g_hTab;
-static HWND g_hPageSign, g_hPageCert;
-static HWND g_hProgress, g_hLog;
-static HANDLE g_hThread = NULL;  /* signing worker thread */
-static int g_debug = 0;  /* 0=normal, 1=debug */
-
-/* Color scheme */
-static HBRUSH g_hbrBg;             /* main background */
-static HBRUSH g_hbrLogBg;          /* log area dark background */
-static HBRUSH g_hbrEditBg;         /* edit control background */
-static HBRUSH g_hbrBtnFace;        /* button/checkbox background */
-static HBRUSH g_hbrAccent;         /* accent color for primary buttons */
-static COLORREF g_clrBg            = RGB(235, 237, 242);  /* #EBEDF2 cool light gray */
-static COLORREF g_clrLogBg         = RGB(34, 35, 38);     /* #222326 dark warm */
-static COLORREF g_clrLogText       = RGB(232, 233, 237);  /* #E8E9ED light gray */
-static COLORREF g_clrAccent        = RGB(94, 106, 210);   /* #5E6AD2 slate blue-violet */
-static COLORREF g_clrAccentHover   = RGB(120, 130, 224);  /* #7882E0 lighter hover */
-static COLORREF g_clrAccentDark    = RGB(75, 85, 178);    /* #4B55B2 pressed */
-static COLORREF g_clrText          = RGB(43, 43, 47);     /* #2B2B2F soft near-black */
-static COLORREF g_clrLabel         = RGB(100, 104, 112);  /* muted gray */
-static COLORREF g_clrEditBg        = RGB(255, 255, 255);  /* white */
-static COLORREF g_clrLogOK         = RGB(74, 222, 128);   /* #4ADE80 fresh green */
-static COLORREF g_clrLogFail       = RGB(248, 113, 113);  /* #F87171 soft red */
-static COLORREF g_clrLogSkip       = RGB(155, 155, 173);  /* #9B9BAD muted */
-static COLORREF g_clrBorder        = RGB(208, 214, 224);  /* #D0D6E0 soft border */
-
-/* ------------------------------------------------------------------ */
-/* Helpers                                                             */
-/* ------------------------------------------------------------------ */
-
-static void wide_from_utf8(const char *src, wchar_t *dst, int dst_chars)
+static VOID
+invoke_start_sign(VOID *tag, UINT argc, const VALUE *argv, VALUE *retval)
 {
-    if (!src || !dst || dst_chars <= 0) { if (dst && dst_chars > 0) dst[0] = L'\0'; return; }
-    if (!src[0]) { dst[0] = L'\0'; return; }
-    MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, dst_chars);
+    (void)tag; (void)retval;
+
+    if (argc < 8) return;
+
+    SignParams *p = (SignParams *)calloc(1, sizeof(SignParams));
+    if (!p) return;
+
+    val_to_utf8(&argv[0], p->target,   sizeof(p->target));
+    val_to_utf8(&argv[1], p->pfx,      sizeof(p->pfx));
+    val_to_utf8(&argv[2], p->password, sizeof(p->password));
+    val_to_utf8(&argv[3], p->tsa_url,  sizeof(p->tsa_url));
+    val_to_utf8(&argv[4], p->outdir,   sizeof(p->outdir));
+    p->recursive = val_to_int(&argv[5], 0);
+    p->force     = val_to_int(&argv[6], 0);
+    p->debug     = val_to_int(&argv[7], 0);
+
+    HANDLE h = CreateThread(NULL, 0, sign_worker, p, 0, NULL);
+    if (h) CloseHandle(h);
+    else   free(p);
 }
 
-static void wide_to_utf8(const wchar_t *src, char *dst, int dst_chars)
+/* ----------------------------------------------------------------- */
+/* Native functor: generate_cert(dir, pw, days, cn, email)           */
+/* ----------------------------------------------------------------- */
+
+static VOID
+invoke_generate_cert(VOID *tag, UINT argc, const VALUE *argv, VALUE *retval)
 {
-    if (!src || !src[0]) { dst[0] = '\0'; return; }
-    WideCharToMultiByte(CP_UTF8, 0, src, -1, dst, dst_chars, NULL, NULL);
+    (void)tag;
+    if (argc < 5) return;
+
+    char outdir[MAX_PATH] = {0};
+    char pw[256]          = {0};
+    char cn[256]          = {0};
+    char email[256]       = {0};
+    int  days;
+
+    val_to_utf8(&argv[0], outdir, sizeof(outdir));
+    val_to_utf8(&argv[1], pw,     sizeof(pw));
+    days    = val_to_int(&argv[2], 90);
+    val_to_utf8(&argv[3], cn,     sizeof(cn));
+    val_to_utf8(&argv[4], email,  sizeof(email));
+
+    /* Ensure output directory exists */
+    CreateDirectoryA(outdir, NULL);
+
+    int ok = cert_generate(outdir,
+                           NULL,        /* ca_password  — no password for CA key */
+                           pw[0] ? pw : NULL,
+                           days,
+                           cn[0]  ? cn  : NULL,
+                           email[0] ? email : NULL);
+
+    ValueIntDataSet(retval, ok ? 1 : 0, T_BOOL, 0);
 }
 
-static void log_message(HWND hList, const wchar_t *fmt, ...)
+/* ----------------------------------------------------------------- */
+/* Native functor: browse_folder() — returns selected folder path    */
+/* ----------------------------------------------------------------- */
+
+static VOID
+invoke_browse_folder(VOID *tag, UINT argc, const VALUE *argv, VALUE *retval)
 {
-    wchar_t buf[2048];
-    va_list args;
-    va_start(args, fmt);
-    vswprintf(buf, sizeof(buf) / sizeof(wchar_t), fmt, args);
-    va_end(args);
+    (void)tag; (void)argc; (void)argv;
 
-    int idx = (int)SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)buf);
-    SendMessageW(hList, LB_SETTOPINDEX, idx, 0);
-}
-
-static void log_debug(HWND hList, const wchar_t *fmt, ...)
-{
-    if (!g_debug) return;
-    wchar_t buf[2048];
-    va_list args;
-    va_start(args, fmt);
-    vswprintf(buf, sizeof(buf) / sizeof(wchar_t), fmt, args);
-    va_end(args);
-
-    int idx = (int)SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)buf);
-    SendMessageW(hList, LB_SETTOPINDEX, idx, 0);
-}
-
-static BOOL browse_file(HWND hwnd, const wchar_t *filter, const wchar_t *title,
-                         wchar_t *outpath, DWORD outsize)
-{
-    OPENFILENAMEW ofn;
-    memset(&ofn, 0, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = filter;
-    ofn.lpstrFile = outpath;
-    ofn.nMaxFile = outsize;
-    ofn.lpstrTitle = title;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    outpath[0] = L'\0';
-    return GetOpenFileNameW(&ofn);
-}
-
-static BOOL browse_folder(HWND hwnd, const wchar_t *title, wchar_t *outpath)
-{
     BROWSEINFOW bi;
     memset(&bi, 0, sizeof(bi));
-    bi.hwndOwner = hwnd;
-    bi.lpszTitle = title;
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    bi.hwndOwner = g_hwnd;
+    bi.lpszTitle = L"选择目录";
+    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
 
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return FALSE;
-
-    BOOL ret = SHGetPathFromIDListW(pidl, outpath);
-    CoTaskMemFree(pidl);
-    return ret;
-}
-
-/* Set font on a window and all its children */
-static void set_font_callback(HWND child)
-{
-    SendMessageW(child, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-}
-
-static void apply_font(HWND parent)
-{
-    EnumChildWindows(parent, (WNDENUMPROC)set_font_callback, 0);
-}
-
-static HWND make_ctrl(HWND parent, const wchar_t *cls, const wchar_t *text,
-                       DWORD style, int x, int y, int w, int ht, int id)
-{
-    HWND hw = CreateWindowExW(0, cls, text,
-                               WS_CHILD | WS_VISIBLE | style,
-                               x, y, w, ht,
-                               parent, (HMENU)(INT_PTR)id, g_hInst, NULL);
-    SendMessageW(hw, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-    return hw;
-}
-
-/* ------------------------------------------------------------------ */
-/* Sign page                                                           */
-/* ------------------------------------------------------------------ */
-
-static void create_sign_page(HWND parent)
-{
-    g_hPageSign = CreateWindowExW(0, L"STATIC", L"",
-                                   WS_CHILD | WS_VISIBLE | WS_BORDER,
-                                   PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, PAGE_H,
-                                   parent, NULL, g_hInst, NULL);
-
-    int y = 8;
-    int edit_x = W_CLIENT - 2*PAD - W_BROWSE - 6;
-
-    /* Section header */
-    make_ctrl(g_hPageSign, L"STATIC", L"  签名设置",
-              SS_LEFT, 0, y, 300, LH + 2, 0);
-    y += LH + 6;
-
-    /* Target */
-    make_ctrl(g_hPageSign, L"STATIC", L"目标 (文件或目录):", 0, 8, y, edit_x, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
-              0, y, W_EDIT, EH, IDC_EDIT_TARGET);
-    make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_TGT);
-    y += EH + 6;
-
-    /* PFX */
-    make_ctrl(g_hPageSign, L"STATIC", L"PFX 证书文件:", 0, 8, y, edit_x, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
-              0, y, W_EDIT, EH, IDC_EDIT_PFX);
-    make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_PFX);
-    y += EH + 6;
-
-    /* Password */
-    make_ctrl(g_hPageSign, L"STATIC", L"PFX 密码:", 0, 8, y, edit_x, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageSign, L"EDIT", L"",
-              WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
-              0, y, 280, EH, IDC_EDIT_PASSWORD);
-    y += EH + 6;
-
-    /* Timestamp server: combobox + test button */
-    make_ctrl(g_hPageSign, L"STATIC", L"时间戳服务器:", 0, 8, y, edit_x, LH, 0);
-    y += LH + 3;
-    {
-        HWND hCombo = CreateWindowExW(0, L"COMBOBOX", NULL,
-            WS_BORDER | WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_HASSTRINGS | WS_VSCROLL,
-            0, y, W_EDIT - 90, 250,
-            g_hPageSign, (HMENU)(INT_PTR)IDC_COMBO_TIMESTAMP, g_hInst, NULL);
-        if (hCombo) {
-            wchar_t wurl[256];
-            for (int i = 0; i < TSA_SERVER_COUNT; i++) {
-                MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].url, -1,
-                                    wurl, 256);
-                SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)wurl);
-            }
-            SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
+    if (pidl) {
+        WCHAR path[MAX_PATH];
+        if (SHGetPathFromIDListW(pidl, path)) {
+            ValueStringDataSet(retval, path, (UINT)wcslen(path),
+                               UT_STRING_STRING);
         }
+        CoTaskMemFree(pidl);
     }
-    make_ctrl(g_hPageSign, L"BUTTON", L"测速",
-              0, W_EDIT - 86, y, 80, EH, IDC_BTN_TEST_TSA);
-    y += EH + 6;
-
-    /* Output dir */
-    make_ctrl(g_hPageSign, L"STATIC", L"输出目录 (可选, 留空 = 覆盖原文件):", 0, 8, y, edit_x, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageSign, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
-              0, y, W_EDIT, EH, IDC_EDIT_OUTDIR);
-    make_ctrl(g_hPageSign, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_OUT);
-    y += EH + 8;
-
-    /* Checkboxes */
-    make_ctrl(g_hPageSign, L"BUTTON", L"包含子目录",
-              BS_AUTOCHECKBOX, 4, y, 200, LH, IDC_CHK_RECURSIVE);
-    make_ctrl(g_hPageSign, L"BUTTON", L"强制重新签名",
-              BS_AUTOCHECKBOX, 220, y, 180, LH, IDC_CHK_FORCE);
-    make_ctrl(g_hPageSign, L"BUTTON", L"调试日志",
-              BS_AUTOCHECKBOX, 410, y, 120, LH, IDC_CHK_DEBUG);
-    y += LH + 10;
-
-    /* Separator line */
-    HWND hSep = make_ctrl(g_hPageSign, L"STATIC", L"",
-                           SS_ETCHEDHORZ, 0, y, W_CLIENT - 2*PAD, 2, 0);
-    (void)hSep;
-    y += 8;
-
-    /* Sign button */
-    make_ctrl(g_hPageSign, L"BUTTON", L"开始签名",
-              BS_OWNERDRAW, 0, y, W_BTN_SIGN, EH + 4, IDC_BTN_SIGN);
-    y += EH + 4 + 8;
-
-    /* Progress bar */
-    g_hProgress = make_ctrl(g_hPageSign, PROGRESS_CLASSW, L"",
-                             0, 0, y, W_CLIENT - 2*PAD, 22, IDC_PROGRESS);
-    y += 22 + 8;
-
-    /* Log section title */
-    make_ctrl(g_hPageSign, L"STATIC", L"  日志输出",
-              SS_LEFT, 0, y, 300, LH + 2, IDC_LBL_LOG_TITLE);
-    y += LH + 3;
-
-    /* Log listbox */
-    g_hLog = make_ctrl(g_hPageSign, L"LISTBOX", L"",
-                        WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                        0, y, W_CLIENT - 2*PAD, 195, IDC_LIST_LOG);
-
-    /* Log listbox font (monospace feel) */
-    g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                                    GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                                    FIXED_PITCH | FF_MODERN,
-                                    L"Microsoft YaHei UI");
-    if (!g_hMonoFont)
-        g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                                  DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                                  0, L"Segoe UI");
-    SendMessageW(g_hLog, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
-
-    /* Set dark background for log listbox */
-    SendMessageW(g_hLog, LB_SETITEMHEIGHT, 0, 18);
+    /* If user cancelled, retval stays undefined → TIScript gets undefined */
 }
 
-/* ------------------------------------------------------------------ */
-/* Certificate generation page                                          */
-/* ------------------------------------------------------------------ */
+/* ----------------------------------------------------------------- */
+/* Native functor: browse_file(filter) — returns selected file path   */
+/* The filter string is null-separated like "PFX\0*.pfx;*.p12\0..."  */
+/* as constructed in TIScript via String.fromCharCode(0).             */
+/* ----------------------------------------------------------------- */
 
-static void create_cert_page(HWND parent)
+static VOID
+invoke_browse_file(VOID *tag, UINT argc, const VALUE *argv, VALUE *retval)
 {
-    g_hPageCert = CreateWindowExW(0, L"STATIC", L"",
-                                   WS_CHILD | WS_BORDER,
-                                   PAD, PAGE_TOP,
-                                   W_CLIENT - 2*PAD, PAGE_H,
-                                   parent, NULL, g_hInst, NULL);
+    (void)tag;
 
-    int y = 8;
+    LPCWSTR filter_str = NULL;
+    UINT    filter_len = 0;
+    WCHAR   default_filter[] = L"All Files\0*.*\0";
 
-    /* Section header */
-    make_ctrl(g_hPageCert, L"STATIC", L"  证书生成",
-              SS_LEFT, 0, y, 300, LH + 2, IDC_LBL_CERT_TITLE);
-    y += LH + 8;
+    if (argc > 0)
+        ValueStringData(&argv[0], &filter_str, &filter_len);
 
-    /* Description */
-    make_ctrl(g_hPageCert, L"STATIC",
-              L"生成自签名根 CA + 代码签名证书。\n"
-              L"将根 CA 导入 Windows 受信任根存储即可信任签名。",
-              SS_LEFT, 8, y, W_CLIENT - 2*PAD - 16, 36, 0);
-    y += 44;
+    WCHAR file_buf[MAX_PATH] = {0};
 
-    /* Output directory */
-    make_ctrl(g_hPageCert, L"STATIC", L"输出目录:", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageCert, L"EDIT", L"./certs",
-              WS_BORDER | ES_AUTOHSCROLL,
-              0, y, W_EDIT, EH, IDC_EDIT_CERT_DIR);
-    make_ctrl(g_hPageCert, L"BUTTON", L"浏览...",
-              0, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_CD);
-    y += EH + 8;
+    OPENFILENAMEW ofn;
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize  = sizeof(ofn);
+    ofn.hwndOwner    = g_hwnd;
+    ofn.lpstrFile    = file_buf;
+    ofn.nMaxFile     = MAX_PATH;
+    ofn.lpstrFilter  = (filter_str && filter_len > 0) ? filter_str : default_filter;
+    ofn.nFilterIndex = 1;
+    ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
 
-    /* Validity days */
-    make_ctrl(g_hPageCert, L"STATIC", L"签名证书有效期 (天):", 0, 8, y, 180, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageCert, L"EDIT", L"90",
-              WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
-              0, y, 80, EH, IDC_EDIT_CERT_DAYS);
-    y += EH + 8;
-
-    /* PFX password */
-    make_ctrl(g_hPageCert, L"STATIC", L"PFX 密码 (签名时需填写此密码):", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageCert, L"EDIT", L"",
-              WS_BORDER | ES_AUTOHSCROLL,
-              0, y, 280, EH, IDC_EDIT_CERT_PW);
-    y += EH + 8;
-
-    /* Signer CN (name) */
-    make_ctrl(g_hPageCert, L"STATIC", L"签名者姓名 (CN, 可选, 默认: FileSigner Code Signing):", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageCert, L"EDIT", L"",
-              WS_BORDER | ES_AUTOHSCROLL,
-              0, y, 280, EH, IDC_EDIT_CERT_CN);
-    y += EH + 8;
-
-    /* Signer email */
-    make_ctrl(g_hPageCert, L"STATIC", L"签名者邮箱 (可选, 用于证书标识):", 0, 8, y, W_CLIENT - 2*PAD, LH, 0);
-    y += LH + 3;
-    make_ctrl(g_hPageCert, L"EDIT", L"",
-              WS_BORDER | ES_AUTOHSCROLL,
-              0, y, 280, EH, IDC_EDIT_CERT_EMAIL);
-    y += EH + 10;
-
-    /* Separator line */
-    make_ctrl(g_hPageCert, L"STATIC", L"",
-              SS_ETCHEDHORZ, 0, y, W_CLIENT - 2*PAD, 2, 0);
-    y += 8;
-
-    /* Generate button */
-    make_ctrl(g_hPageCert, L"BUTTON", L"生成证书",
-              BS_OWNERDRAW, 0, y, W_BTN_GEN, EH + 4, IDC_BTN_GENERATE);
-    y += EH + 4 + 10;
-
-    /* Status label */
-    make_ctrl(g_hPageCert, L"STATIC", L"",
-              SS_LEFT, 8, y, W_CLIENT - 2*PAD - 16, 140, IDC_LBL_CERT_STATUS);
+    if (GetOpenFileNameW(&ofn)) {
+        ValueStringDataSet(retval, file_buf, (UINT)wcslen(file_buf),
+                           UT_STRING_STRING);
+    }
 }
 
-/* ------------------------------------------------------------------ */
-/* Tab switching                                                       */
-/* ------------------------------------------------------------------ */
+/* ----------------------------------------------------------------- */
+/* Native functor: test_tsa(url) — returns bool                      */
+/* ----------------------------------------------------------------- */
 
-static void switch_tab(int idx)
+static VOID
+invoke_test_tsa(VOID *tag, UINT argc, const VALUE *argv, VALUE *retval)
 {
-    ShowWindow(g_hPageSign, idx == 0 ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_hPageCert, idx == 1 ? SW_SHOW : SW_HIDE);
+    (void)tag;
+    if (argc < 1) return;
+
+    char url[512];
+    val_to_utf8(&argv[0], url, sizeof(url));
+
+    int ok = timestamp_test_server(url);
+    ValueIntDataSet(retval, ok ? 1 : 0, T_BOOL, 0);
 }
 
-/* ------------------------------------------------------------------ */
-/* Window procedure                                                    */
-/* ------------------------------------------------------------------ */
+/* ----------------------------------------------------------------- */
+/* Register all native functions on the view's expando as             */
+/* view.frame.methodName(...)                                         */
+/* ----------------------------------------------------------------- */
 
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static void
+register_native_functions(HWINDOW hwnd)
 {
+    VALUE expando, frame, key, func;
+
+    ValueInit(&expando);
+    ValueInit(&frame);
+    ValueInit(&key);
+    ValueInit(&func);
+
+    /* Get the view's global namespace (accessible as "view" in TIScript) */
+    SciterGetViewExpando(hwnd, &expando);
+
+    /* ---- Build the "frame" sub-object ---- */
+    /* (so TIScript calls view.frame.start_sign(...) etc.) */
+
+#define REGISTER_METHOD(method_name, handler)                          \
+    do {                                                               \
+        ValueNativeFunctorSet(&func, handler, NULL, NULL);             \
+        WCHAR wname[64];                                               \
+        MultiByteToWideChar(CP_UTF8, 0, method_name, -1, wname, 64);  \
+        ValueStringDataSet(&key, wname, (UINT)wcslen(wname),           \
+                           UT_STRING_STRING);                           \
+        ValueSetValueToKey(&frame, &key, &func);                       \
+        ValueClear(&key);                                              \
+        ValueClear(&func);                                             \
+    } while (0)
+
+    REGISTER_METHOD("start_sign",     invoke_start_sign);
+    REGISTER_METHOD("generate_cert",  invoke_generate_cert);
+    REGISTER_METHOD("browse_folder",  invoke_browse_folder);
+    REGISTER_METHOD("browse_file",    invoke_browse_file);
+    REGISTER_METHOD("test_tsa",       invoke_test_tsa);
+
+    /* ---- Set frame on view expando ---- */
+    ValueStringDataSet(&key, L"frame", 5, UT_STRING_STRING);
+    ValueSetValueToKey(&expando, &key, &frame);
+
+    ValueClear(&key);
+    ValueClear(&frame);
+    ValueClear(&expando);
+
+#undef REGISTER_METHOD
+}
+
+/* ----------------------------------------------------------------- */
+/* Populate TSA server dropdown via TIScript setTSAServers()          */
+/* ----------------------------------------------------------------- */
+
+static void
+populate_tsa_servers(HWINDOW hwnd)
+{
+    WCHAR script[4096];
+    wcscpy(script, L"setTSAServers([");
+    int first = 1;
+
+    for (int i = 0; i < TSA_SERVER_COUNT; i++) {
+        if (!first) wcscat(script, L",");
+        first = 0;
+
+        WCHAR wlabel[128], wurl[512];
+        MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].label, -1,
+                             wlabel, 128);
+        MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].url, -1,
+                             wurl, 512);
+
+        wcscat(script, L"{label:'");
+        wcscat(script, wlabel);
+        wcscat(script, L"',url:'");
+        wcscat(script, wurl);
+        wcscat(script, L"'}");
+    }
+    wcscat(script, L"]);");
+
+    SciterEval(hwnd, script, (UINT)wcslen(script), NULL);
+}
+
+/* ----------------------------------------------------------------- */
+/* Sciter host callback — resource loading, engine lifecycle          */
+/* ----------------------------------------------------------------- */
+
+static UINT SC_CALLBACK
+host_callback(LPSCITER_CALLBACK_NOTIFICATION pns, LPVOID param)
+{
+    (void)param;
+
+    switch (pns->code) {
+    case SC_ENGINE_DESTROYED:
+        PostQuitMessage(0);
+        return 0;
+    case SC_LOAD_DATA:
+        /* Let Sciter handle resource loading via built-in file loader */
+        return LOAD_OK;
+    default:
+        return 0;
+    }
+}
+
+/* ----------------------------------------------------------------- */
+/* Sciter window delegate — receives Win32 messages forwarded by      */
+/* Sciter's internal WndProc.                                         */
+/* ----------------------------------------------------------------- */
+
+static LRESULT SC_CALLBACK
+wnd_delegate(HWINDOW hwnd, UINT msg, WPARAM wParam,
+             LPARAM lParam, LPVOID pParam, SBOOL *handled)
+{
+    (void)pParam;
+
     switch (msg) {
-    case WM_APP_LOG:
-    {
-        wchar_t *wmsg = (wchar_t *)lParam;
-        if (wmsg) {
-            int idx = (int)SendMessageW(g_hLog, LB_ADDSTRING, 0, (LPARAM)wmsg);
-            SendMessageW(g_hLog, LB_SETTOPINDEX, idx, 0);
-            free(wmsg);
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        *handled = TRUE;
+        return 0;
+
+    case WM_SCITER_EVAL: {
+        /* Execute a script string that was posted from a worker thread */
+        LPCWSTR script = (LPCWSTR)lParam;
+        if (script) {
+            SciterEval(hwnd, script, (UINT)wcslen(script), NULL);
+            free((void *)script);
         }
+        *handled = TRUE;
         return 0;
     }
-    case WM_APP_PROGRESS:
-    {
-        int pct = (int)wParam;
-        SendMessageW(g_hProgress, PBM_SETPOS, (WPARAM)pct, 0);
-        return 0;
-    }
-    case WM_APP_SIGN_DONE:
-    {
-        /* Clean up thread handle */
-        if (g_hThread) {
-            WaitForSingleObject(g_hThread, INFINITE);
-            CloseHandle(g_hThread);
-            g_hThread = NULL;
-        }
-        int count = (int)wParam;
-        if (count < 0) {
-            log_message(g_hLog, L"签名过程异常终止，请检查输入文件和证书");
-        } else {
-            wchar_t completed[128];
-            wsprintfW(completed, L"完成 - 已签名 %d 个文件", count);
-            log_message(g_hLog, L"%ls", completed);
-        }
-        /* Re-enable sign button */
-        HWND hBtn = GetDlgItem(g_hPageSign, IDC_BTN_SIGN);
-        EnableWindow(hBtn, TRUE);
-        return 0;
     }
 
-        case WM_CREATE:
-        {
-            /* Tab control */
-            g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
-                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
-                                      | TCS_FLATBUTTONS,
-                                      0, 0, W_CLIENT, TAB_H + 4,
-                                      hwnd, (HMENU)IDC_TAB, g_hInst, NULL);
-            SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    *handled = FALSE;
+    return 0;
+}
 
-            TCITEMW tie;
-            tie.mask = TCIF_TEXT;
-            tie.pszText = L"  签名  ";
-            SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&tie);
-            tie.pszText = L"  生成证书  ";
-            SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&tie);
+/* ----------------------------------------------------------------- */
+/* Entry point — called from main.c :: WinMain                       */
+/* ----------------------------------------------------------------- */
 
-            create_sign_page(hwnd);
-            create_cert_page(hwnd);
-            apply_font(g_hPageSign);
-            apply_font(g_hPageCert);
-            /* Subclass page panels to forward WM_COMMAND to main window */
-            SetWindowSubclass(g_hPageSign, page_subclass, 0, 0);
-            SetWindowSubclass(g_hPageCert, page_subclass, 0, 0);
-            switch_tab(0);
+int
+gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+         LPSTR lpCmdLine, int nCmdShow)
+{
+    (void)hPrevInstance;
+    (void)lpCmdLine;
 
-            SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
-            SendMessageW(g_hProgress, PBM_SETBARCOLOR, 0, (LPARAM)g_clrAccent);
-            SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, (LPARAM)g_clrBorder);
+    /* Needed for COM-based dialogs (SHBrowseForFolder) and drag-n-drop */
+    OleInitialize(NULL);
 
-            return 0;
-        }
+    /* --- Create the Sciter window --- */
+    RECT frame = { 100, 100, 700, 600 };
+    HWINDOW hwnd = SciterCreateWindow(
+        SW_TITLEBAR | SW_RESIZEABLE | SW_CONTROLS | SW_MAIN,
+        &frame,
+        wnd_delegate,
+        NULL,
+        NULL
+    );
 
-    case WM_CTLCOLORSTATIC:
-    {
-        HDC hdc = (HDC)wParam;
-        HWND hCtrl = (HWND)lParam;
-        /* Page panels → white card background */
-        if (hCtrl == g_hPageSign || hCtrl == g_hPageCert) {
-            SetTextColor(hdc, g_clrText);
-            SetBkColor(hdc, g_clrEditBg);
-            return (LRESULT)g_hbrEditBg;
-        }
-        /* Dark bg for log listbox (it sends CTLCOLORSTATIC too) */
-        if (hCtrl == g_hLog) {
-            SetTextColor(hdc, g_clrLogText);
-            SetBkColor(hdc, g_clrLogBg);
-            return (LRESULT)g_hbrLogBg;
-        }
-        /* Children of page panels — match white card bg */
-        HWND hParent = GetParent(hCtrl);
-        if (hParent == g_hPageSign || hParent == g_hPageCert) {
-            int id = GetDlgCtrlID(hCtrl);
-            /* Section headers → accent color + semibold font */
-            if (id == IDC_LBL_LOG_TITLE || id == IDC_LBL_CERT_TITLE) {
-                SetTextColor(hdc, g_clrAccent);
-                SetBkColor(hdc, g_clrEditBg);
-                SelectObject(hdc, g_hFontSection);
-                return (LRESULT)g_hbrEditBg;
-            }
-            SetTextColor(hdc, g_clrText);
-            SetBkColor(hdc, g_clrEditBg);
-            return (LRESULT)g_hbrEditBg;
-        }
-        /* Light background for all other static controls */
-        SetTextColor(hdc, g_clrText);
-        SetBkColor(hdc, g_clrBg);
-        return (LRESULT)g_hbrBg;
-    }
-
-    case WM_CTLCOLOREDIT:
-    {
-        HDC hdc = (HDC)wParam;
-        SetBkColor(hdc, g_clrEditBg);
-        return (LRESULT)g_hbrEditBg;
-    }
-
-    case WM_DRAWITEM:
-    {
-        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lParam;
-        if (dis->CtlType == ODT_BUTTON &&
-            (dis->CtlID == IDC_BTN_SIGN || dis->CtlID == IDC_BTN_GENERATE)) {
-            HDC hdc = dis->hDC;
-            RECT rc = dis->rcItem;
-            BOOL isPressed = (dis->itemState & ODS_SELECTED);
-            BOOL isHot     = (dis->itemState & ODS_HOTLIGHT);
-            BOOL isFocused = (dis->itemState & ODS_FOCUS);
-
-            /* Background: accent → lighter on hover → darker on press */
-            COLORREF bg = isPressed ? g_clrAccentDark
-                        : isHot     ? g_clrAccentHover
-                                    : g_clrAccent;
-            HBRUSH hbr = CreateSolidBrush(bg);
-            FillRect(hdc, &rc, hbr);
-            DeleteObject(hbr);
-
-            /* 1px subtle border */
-            HPEN pen = CreatePen(PS_SOLID, 1, RGB(80, 90, 190));
-            HPEN oldPen = SelectObject(hdc, pen);
-            HBRUSH oldBr = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
-            SelectObject(hdc, oldBr);
-            SelectObject(hdc, oldPen);
-            DeleteObject(pen);
-
-            /* Text: white, centered, semibold font */
-            wchar_t text[64];
-            GetWindowTextW(dis->hwndItem, text, 64);
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(255, 255, 255));
-            SelectObject(hdc, g_hFont);
-            DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            /* Focus rect */
-            if (isFocused) {
-                RECT fr = rc;
-                fr.left   += 3; fr.top    += 3;
-                fr.right  -= 3; fr.bottom -= 3;
-                DrawFocusRect(hdc, &fr);
-            }
-            return TRUE;
-        }
-        break;
-    }
-
-    case WM_CTLCOLORLISTBOX:
-    {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, g_clrLogText);
-        SetBkColor(hdc, g_clrLogBg);
-        return (LRESULT)g_hbrLogBg;
-    }
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-
-        /* Fill background */
-        FillRect(hdc, &rc, g_hbrBg);
-
-        /* Accent header bar */
-        RECT hdr = { 0, 0, rc.right, 3 };
-        HBRUSH hbrHdr = CreateSolidBrush(g_clrAccent);
-        FillRect(hdc, &hdr, hbrHdr);
-        DeleteObject(hbrHdr);
-
-        /* Thin line below tab area */
-        RECT line = { PAD, PAGE_TOP - 2, rc.right - PAD, PAGE_TOP - 1 };
-        HBRUSH hbrLine = CreateSolidBrush(g_clrBorder);
-        FillRect(hdc, &line, hbrLine);
-        DeleteObject(hbrLine);
-
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-
-    case WM_ERASEBKGND:
-    {
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        FillRect((HDC)wParam, &rc, g_hbrBg);
+    if (!hwnd) {
+        MessageBoxA(NULL, "Failed to create Sciter window.",
+                     "FileSigner", MB_ICONERROR);
+        OleUninitialize();
         return 1;
     }
 
-    case WM_NOTIFY:
-    {
-        NMHDR *nmh = (NMHDR *)lParam;
-        if (nmh->idFrom == IDC_TAB && nmh->code == TCN_SELCHANGE) {
-            switch_tab(TabCtrl_GetCurSel(g_hTab));
-            InvalidateRect(hwnd, NULL, TRUE);
-        }
-        /* Custom draw tab control for modern look */
-        if (nmh->idFrom == IDC_TAB && nmh->code == NM_CUSTOMDRAW) {
-            NMTTCUSTOMDRAW *nmc = (NMTTCUSTOMDRAW *)lParam;
-            if (nmc->nmcd.dwDrawStage == CDDS_PREPAINT)
-                return CDRF_NOTIFYITEMDRAW;
-            if (nmc->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-                int sel = TabCtrl_GetCurSel(g_hTab);
-                BOOL isSel = ((int)nmc->nmcd.dwItemSpec == sel);
-                RECT rc = nmc->nmcd.rc;
+    g_hwnd = (HWND)hwnd;
 
-                /* Fill background */
-                COLORREF bg = isSel ? g_clrEditBg : RGB(234, 235, 240);
-                HBRUSH hbr = CreateSolidBrush(bg);
-                FillRect(nmc->nmcd.hdc, &rc, hbr);
-                DeleteObject(hbr);
+    /* Window title */
+    SetWindowTextW(g_hwnd, L"FileSigner");
 
-                /* Draw accent bar on selected tab */
-                if (isSel) {
-                    RECT bar = { rc.left + 8, rc.bottom - 3, rc.right - 8, rc.bottom };
-                    HBRUSH hbrBar = CreateSolidBrush(g_clrAccent);
-                    FillRect(nmc->nmcd.hdc, &bar, hbrBar);
-                    DeleteObject(hbrBar);
-                }
+    /* --- Set host callback (resource loading, engine destroyed) --- */
+    SciterSetCallback(hwnd, host_callback, NULL);
 
-                /* Draw text */
-                TCITEMW tci;
-                memset(&tci, 0, sizeof(tci));
-                tci.mask = TCIF_TEXT;
-                wchar_t tabText[64] = {0};
-                tci.pszText = tabText;
-                tci.cchTextMax = 64;
-                SendMessageW(g_hTab, TCM_GETITEMW, nmc->nmcd.dwItemSpec, (LPARAM)&tci);
+    /* --- Enable "unisex" UX theming --- */
+    SciterSetOption(hwnd, SCITER_SET_UX_THEMING, TRUE);
 
-                SetBkMode(nmc->nmcd.hdc, TRANSPARENT);
-                SetTextColor(nmc->nmcd.hdc, isSel ? g_clrAccent : g_clrLabel);
-                SelectObject(nmc->nmcd.hdc, g_hFont);
-                DrawTextW(nmc->nmcd.hdc, tabText, -1, &rc,
-                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                return CDRF_SKIPDEFAULT;
-            }
-        }
-        return 0;
-    }
+    /* --- Load the UI file --- */
+    /* Try exe-directory/ui/main.html first, then source tree fallback */
 
-    case WM_COMMAND:
-    {
-        int id = LOWORD(wParam);
+    {   WCHAR path[MAX_PATH];
+        GetModuleFileNameW(NULL, path, MAX_PATH);
+        WCHAR *slash = wcsrchr(path, L'\\');
+        if (slash) *slash = L'\0';
+        wcscat_s(path, MAX_PATH, L"\\ui\\main.html");
 
-        if (id == IDC_BTN_BROWSE_TGT) {
-            wchar_t path[GUI_PATH_LEN] = {0};
-            if (browse_folder(hwnd, L"选择目标目录", path))
-                SetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, path);
-        }
-        else if (id == IDC_BTN_BROWSE_PFX) {
-            wchar_t path[GUI_PATH_LEN] = {0};
-            if (browse_file(hwnd,
-                            L"PFX 文件" L"\0" L"*.pfx;*.p12"
-                            L"\0" L"所有文件" L"\0" L"*.*" L"\0",
-                            L"选择 PFX 文件", path, GUI_PATH_LEN))
-                SetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, path);
-        }
-        else if (id == IDC_BTN_BROWSE_OUT) {
-            wchar_t path[GUI_PATH_LEN] = {0};
-            if (browse_folder(hwnd, L"选择输出目录", path))
-                SetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, path);
-        }
-        else if (id == IDC_BTN_SIGN) {
-            wchar_t wtarget[GUI_PATH_LEN], wpfx[GUI_PATH_LEN], wpassword[256];
-            wchar_t wts_url[512], woutdir[GUI_PATH_LEN];
-
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, wtarget, GUI_PATH_LEN);
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, wpfx, GUI_PATH_LEN);
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_PASSWORD, wpassword, 256);
-            GetDlgItemTextW(g_hPageSign, IDC_COMBO_TIMESTAMP, wts_url, 512);
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, woutdir, GUI_PATH_LEN);
-
-            if (wcslen(wtarget) == 0) {
-                MessageBoxW(hwnd, L"请选择目标文件或目录。",
-                            L"错误", MB_OK | MB_ICONERROR);
-                break;
-            }
-            if (wcslen(wpfx) == 0) {
-                MessageBoxW(hwnd, L"请选择 PFX 文件。",
-                            L"错误", MB_OK | MB_ICONERROR);
-                break;
-            }
-
-            int recursive = IsDlgButtonChecked(g_hPageSign, IDC_CHK_RECURSIVE) == BST_CHECKED;
-            int force = IsDlgButtonChecked(g_hPageSign, IDC_CHK_FORCE) == BST_CHECKED;
-            g_debug = IsDlgButtonChecked(g_hPageSign, IDC_CHK_DEBUG) == BST_CHECKED;
-
-            char target[GUI_PATH_LEN], pfx[GUI_PATH_LEN], password[256];
-            char ts_url[512], outdir[GUI_PATH_LEN];
-            wide_to_utf8(wtarget, target, GUI_PATH_LEN);
-            wide_to_utf8(wpfx, pfx, GUI_PATH_LEN);
-            wide_to_utf8(wpassword, password, 256);
-            wide_to_utf8(wts_url, ts_url, 512);
-            wide_to_utf8(woutdir, outdir, GUI_PATH_LEN);
-
-            /* Prevent concurrent signing */
-            if (g_hThread) {
-                MessageBoxW(hwnd, L"签名操作正在进行中，请等待完成。",
-                            L"提示", MB_OK | MB_ICONINFORMATION);
-                break;
-            }
-
-            /* Build task for worker thread */
-            SignTask *task = (SignTask *)calloc(1, sizeof(SignTask));
-            if (!task) {
-                MessageBoxW(hwnd, L"内存分配失败。", L"错误", MB_OK | MB_ICONERROR);
-                break;
-            }
-            task->hwnd = hwnd;
-            strcpy(task->target, target);
-            strcpy(task->pfx, pfx);
-            if (password[0]) strcpy(task->password, password);
-            if (ts_url[0]) strcpy(task->ts_url, ts_url);
-            if (outdir[0]) strcpy(task->outdir, outdir);
-            task->recursive = recursive;
-            task->force = force;
-            task->debug = g_debug;
-
-            /* Disable button, reset progress, clear log */
-            HWND hBtn = GetDlgItem(g_hPageSign, IDC_BTN_SIGN);
-            EnableWindow(hBtn, FALSE);
-            SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
-            SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
-            log_message(g_hLog, L"开始签名...");
-
-            /* Launch worker thread */
-            g_hThread = CreateThread(NULL, 0, sign_thread_proc, task, 0, NULL);
-            if (!g_hThread) {
-                free(task);
-                EnableWindow(hBtn, TRUE);
-                MessageBoxW(hwnd, L"无法创建签名线程。", L"错误", MB_OK | MB_ICONERROR);
-            }
-        }
-
-        else if (id == IDC_BTN_TEST_TSA) {
-            HWND hBtn = GetDlgItem(hwnd, IDC_BTN_TEST_TSA);
-            EnableWindow(hBtn, FALSE);
-            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"测试中...");
-
-            int latency = 0;
-            int best = timestamp_find_fastest(&latency);
-
-            if (best >= 0) {
-                HWND hCombo = GetDlgItem(g_hPageSign, IDC_COMBO_TIMESTAMP);
-                if (hCombo) {
-                    SendMessageW(hCombo, CB_SETCURSEL, best, 0);
-                }
-                wchar_t msg[128];
-                swprintf(msg, 128, L"最快: %S (%d ms)",
-                         g_tsa_servers[best].label, latency);
-                MessageBoxW(hwnd, msg, L"测速完成", MB_OK | MB_ICONINFORMATION);
-            } else {
-                MessageBoxW(hwnd, L"所有时间戳服务器均不可达。\n请检查网络连接。",
-                            L"测速失败", MB_OK | MB_ICONERROR);
-            }
-
-            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"测速");
-            EnableWindow(hBtn, TRUE);
-        }
-
-        else if (id == IDC_BTN_BROWSE_CD) {
-            wchar_t path[GUI_PATH_LEN] = {0};
-            if (browse_folder(hwnd, L"选择输出目录", path))
-                SetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, path);
-        }
-        else if (id == IDC_BTN_GENERATE) {
-            wchar_t wdir[GUI_PATH_LEN], wdays_str[16], wpw[256];
-            wchar_t wcn[256], wemail[256];
-            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DIR, wdir, GUI_PATH_LEN);
-            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_DAYS, wdays_str, 16);
-            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_PW, wpw, 256);
-            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_CN, wcn, 256);
-            GetDlgItemTextW(g_hPageCert, IDC_EDIT_CERT_EMAIL, wemail, 256);
-
-            if (wcslen(wdir) == 0) {
-                MessageBoxW(hwnd, L"请选择输出目录。",
-                            L"错误", MB_OK | MB_ICONERROR);
-                break;
-            }
-
-            int days = _wtoi(wdays_str);
-            if (days <= 0) days = 90;
-
-            char dir[GUI_PATH_LEN], pw[256], cn[256], email[256];
-            wide_to_utf8(wdir, dir, GUI_PATH_LEN);
-            wide_to_utf8(wpw, pw, 256);
-            wide_to_utf8(wcn, cn, 256);
-            wide_to_utf8(wemail, email, 256);
-            if (!directory_exists(dir)) create_directory(dir);
-
-            HWND hBtn = GetDlgItem(g_hPageCert, IDC_BTN_GENERATE);
-            EnableWindow(hBtn, FALSE);
-            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, L"正在生成...");
-
-            const char *pfx_pw = pw[0] ? pw : NULL;
-            const char *cert_cn = cn[0] ? cn : NULL;
-            const char *cert_email = email[0] ? email : NULL;
-            if (cert_generate(dir, NULL, pfx_pw, days, cert_cn, cert_email)) {
-                wchar_t msg[512];
-                if (wpw[0])
-                    wsprintfW(msg,
-                             L"证书生成成功!\n\n"
-                             L"生成文件位于: %s\n\n"
-                             L"PFX 密码已设置，签名时请使用相同密码。\n"
-                             L"请将 FileSigner_RootCA.cer 导入\n"
-                             L"Windows 受信任的根证书颁发机构",
-                             wdir);
-                else
-                    wsprintfW(msg,
-                             L"证书生成成功!\n\n"
-                             L"生成文件位于: %s\n\n"
-                             L"PFX 无密码，签名时密码留空即可。\n"
-                             L"请将 FileSigner_RootCA.cer 导入\n"
-                             L"Windows 受信任的根证书颁发机构",
-                             wdir);
-                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, msg);
-                MessageBoxW(hwnd, msg, L"成功", MB_OK | MB_ICONINFORMATION);
-            } else {
-                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
-                                L"生成失败! 请查看控制台输出。");
-                MessageBoxW(hwnd, L"证书生成失败。",
-                            L"错误", MB_OK | MB_ICONERROR);
-            }
-
-            EnableWindow(hBtn, TRUE);
-        }
-
-        return 0;
-    }
-
-    case WM_CLOSE:
-        /* Block close while signing thread is running */
-        if (g_hThread) {
-            MessageBoxW(hwnd, L"签名操作正在进行中，请等待完成后再关闭。",
-                        L"提示", MB_OK | MB_ICONINFORMATION);
-            return 0;
-        }
-        break;  /* fall through to DefWindowProcW */
-
-    case WM_DESTROY:
-        if (g_hThread) {
-            WaitForSingleObject(g_hThread, INFINITE);
-            CloseHandle(g_hThread);
-            g_hThread = NULL;
-        }
-        RemoveWindowSubclass(g_hPageSign, page_subclass, 0);
-        RemoveWindowSubclass(g_hPageCert, page_subclass, 0);
-        PostQuitMessage(0);
-        return 0;
-    }
-
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
-}
-
-/* ------------------------------------------------------------------ */
-/* GUI entry point                                                     */
-/* ------------------------------------------------------------------ */
-
-/* Global unhandled exception filter — writes crash info to file
- * as fallback when __try/__except can't catch (e.g. stack overflow) */
-static LONG WINAPI crash_dump_filter(EXCEPTION_POINTERS *ep)
-{
-    wchar_t logpath[GUI_PATH_LEN];
-    DWORD len = GetTempPathW(GUI_PATH_LEN, logpath);
-    if (len > 0 && len < GUI_PATH_LEN - 30) {
-        wcscat(logpath, L"filesigner_crash.log");
-        HANDLE f = CreateFileW(logpath, GENERIC_WRITE, 0, NULL,
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (f != INVALID_HANDLE_VALUE) {
-            char buf[512];
-            DWORD written;
-            int n = _snprintf(buf, sizeof(buf),
-                "FileSigner crash log\r\n"
-                "Exception code: 0x%08X\r\n"
-                "Exception address: 0x%p\r\n"
-                "\r\nPossible causes:\r\n"
-                "  0xC0000094 = Integer divide by zero\r\n"
-                "  0xC0000005 = Access violation\r\n"
-                "  0xC00000FD = Stack overflow\r\n",
-                ep->ExceptionRecord->ExceptionCode,
-                (void*)ep->ExceptionRecord->ExceptionAddress);
-            if (n > 0)
-                WriteFile(f, buf, (DWORD)n, &written, NULL);
-            CloseHandle(f);
+        if (!SciterLoadFile(hwnd, path)) {
+            /* Fallback: running from build directory */
+            SciterLoadFile(hwnd, L"src/gui/ui/main.html");
         }
     }
-    return EXCEPTION_EXECUTE_HANDLER;
-}
 
-int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-             LPSTR lpCmdLine, int nCmdShow)
-{
-    WNDCLASSW wc;
-    HWND hwnd;
+    /* --- Register native functions --- */
+    register_native_functions(hwnd);
+
+    /* --- Populate TSA server dropdown --- */
+    populate_tsa_servers(hwnd);
+
+    /* --- Show window --- */
+    ShowWindow(g_hwnd, nCmdShow);
+    UpdateWindow(g_hwnd);
+
+    /* --- Message loop --- */
     MSG msg;
-
-    /* Install global crash handler */
-    SetUnhandledExceptionFilter(crash_dump_filter);
-
-    /* DPI awareness */
-    HMODULE hUser = GetModuleHandleW(L"user32.dll");
-    typedef BOOL (WINAPI *SetDpiAwarenessCtx_t)(HANDLE);
-    SetDpiAwarenessCtx_t pSetDpiAware =
-        (SetDpiAwarenessCtx_t)(hUser ?
-            GetProcAddress(hUser, "SetProcessDpiAwarenessContext") : NULL);
-    if (pSetDpiAware)
-        pSetDpiAware((HANDLE)-4); /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */
-    else
-        SetProcessDPIAware();
-
-    /* Init common controls */
-    INITCOMMONCONTROLSEX icc;
-    icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_TAB_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES;
-    InitCommonControlsEx(&icc);
-
-    CoInitialize(NULL);
-    g_hInst = hInstance;
-    (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
-
-    /* Create fonts */
-    g_hFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                            GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                            0, L"Microsoft YaHei UI");
-    if (!g_hFont)
-        g_hFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                              DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                              0, L"Segoe UI");
-    /* Section header font — slightly larger, semibold */
-    g_hFontSection = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                                  GB2312_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                                  0, L"Microsoft YaHei UI");
-    if (!g_hFontSection)
-        g_hFontSection = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                                      DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                                      0, L"Segoe UI");
-
-    /* Create brushes for custom colors */
-    g_hbrBg     = CreateSolidBrush(g_clrBg);
-    g_hbrLogBg  = CreateSolidBrush(g_clrLogBg);
-    g_hbrEditBg = CreateSolidBrush(g_clrEditBg);
-    g_hbrBtnFace = CreateSolidBrush(g_clrBg);
-    g_hbrAccent  = CreateSolidBrush(g_clrAccent);
-
-    /* Register window class */
-    memset(&wc, 0, sizeof(wc));
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = g_hbrBg;
-    wc.lpszClassName = L"FileSignerGUI";
-    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MAIN_ICON));
-    RegisterClassW(&wc);
-
-    /* Create window, centered on screen */
-    int win_w = W_CLIENT + 2 * GetSystemMetrics(SM_CXSIZEFRAME);
-    int win_h = 680 + 2 * GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CYCAPTION);
-    int scr_w = GetSystemMetrics(SM_CXSCREEN);
-    int scr_h = GetSystemMetrics(SM_CYSCREEN);
-    int win_x = (scr_w - win_w) / 2;
-    int win_y = (scr_h - win_h) / 2;
-
-    hwnd = CreateWindowExW(0, L"FileSignerGUI",
-                            L"FileSigner  Authenticode PE 签名工具",
-                            WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
-                            win_x, win_y, win_w, win_h,
-                            NULL, NULL, g_hInst, NULL);
-
-    if (!hwnd) return 1;
-
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
-
-    while (GetMessageW(&msg, NULL, 0, 0)) {
-        if (!IsDialogMessageW(hwnd, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
 
-    /* Cleanup */
-    DeleteObject(g_hFont);
-    if (g_hFontSection) DeleteObject(g_hFontSection);
-    if (g_hMonoFont) DeleteObject(g_hMonoFont);
-    DeleteObject(g_hbrBg);
-    DeleteObject(g_hbrLogBg);
-    DeleteObject(g_hbrEditBg);
-    DeleteObject(g_hbrBtnFace);
-    DeleteObject(g_hbrAccent);
-    CoUninitialize();
+    /* Cancel any remaining eval messages in the queue */
+    MSG dummy;
+    while (PeekMessage(&dummy, NULL, WM_SCITER_EVAL, WM_SCITER_EVAL, PM_REMOVE)) {
+        free((void *)dummy.lParam);
+    }
+
+    OleUninitialize();
     return (int)msg.wParam;
 }
-
-#endif /* _WIN32 */

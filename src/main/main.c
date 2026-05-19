@@ -5,8 +5,11 @@
 #include <openssl/applink.c>
 
 extern int cli_main(int argc, char *argv[]);
+
+#ifdef HAVE_SCITER
 extern int gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     LPSTR lpCmdLine, int nCmdShow);
+#endif
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
@@ -21,6 +24,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return cli_main(__argc, __argv);
     }
 
+#ifdef HAVE_SCITER
     /* Double-click launch — run GUI */
     return gui_main(hInstance, hPrevInstance, lpCmdLine, nCmdShow);
+#else
+    (void)hInstance; (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
+    MessageBoxA(NULL, "Sciter SDK not found.\n\n"
+                "Download it and set SCITER_SDK_DIR, or run from command line.\n"
+                "https://github.com/c-smile/sciter-sdk",
+                "FileSigner", MB_ICONINFORMATION);
+    return 1;
+#endif
 }

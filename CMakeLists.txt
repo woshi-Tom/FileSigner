@@ -16,6 +16,28 @@ else()
     endif()
 endif()
 
+# Sciter SDK path — set SCITER_SDK_DIR or put SDK in third_party/sciter/
+if(NOT SCITER_SDK_DIR)
+    set(SCITER_SDK_DIR "${CMAKE_SOURCE_DIR}/third_party/sciter")
+endif()
+
+if(EXISTS "${SCITER_SDK_DIR}/include/sciter-x.h")
+    message(STATUS "Found Sciter SDK: ${SCITER_SDK_DIR}")
+    set(HAVE_SCITER TRUE)
+    add_definitions(-DHAVE_SCITER -DSKIP_MAIN)
+    set(SCITER_INCLUDE_DIR "${SCITER_SDK_DIR}/include")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(SCITER_LIB_DIR "${SCITER_SDK_DIR}/bin.win/x64")
+    else()
+        set(SCITER_LIB_DIR "${SCITER_SDK_DIR}/bin.win/x32")
+    endif()
+else()
+    message(WARNING "Sciter SDK not found at ${SCITER_SDK_DIR}. "
+                    "GUI will not be built. Download from: "
+                    "https://github.com/c-smile/sciter-sdk")
+    set(HAVE_SCITER FALSE)
+endif()
+
 # Find OpenSSL (3.x required — 1.x is EOL with known CVEs)
 find_package(OpenSSL 3.0 REQUIRED)
 if(NOT OpenSSL_FOUND)
@@ -28,6 +50,7 @@ include_directories(
     src/include
     res
     ${OPENSSL_INCLUDE_DIR}
+    ${SCITER_INCLUDE_DIR}
 )
 
 # Core source files
@@ -48,8 +71,14 @@ set(UTIL_SOURCES
 set(MAIN_SOURCES
     src/main/main.c
     src/main/cli.c
-    src/gui/gui_main.c
 )
+
+# GUI source — only if Sciter SDK is available
+if(HAVE_SCITER)
+    list(APPEND MAIN_SOURCES
+        src/gui/gui_main.c
+    )
+endif()
 
 # Resource file (icon + version info)
 set(RESOURCE_FILES
@@ -74,6 +103,9 @@ target_link_libraries(filesigner
     OpenSSL::Crypto
 )
 
+# Sciter uses LoadLibrary/GetProcAddress at runtime — no import lib needed.
+# The DLL must be next to the executable.
+
 if(WIN32)
     target_link_libraries(filesigner
         winhttp
@@ -83,7 +115,23 @@ if(WIN32)
     )
 endif()
 
+# Copy sciter.dll next to the executable
+if(HAVE_SCITER AND WIN32)
+    add_custom_command(TARGET filesigner POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SCITER_LIB_DIR}/sciter.dll"
+            "$<TARGET_FILE_DIR:filesigner>/sciter.dll"
+        COMMENT "Copying sciter.dll"
+    )
+endif()
+
 # Install
 install(TARGETS filesigner
     DESTINATION bin
 )
+
+if(HAVE_SCITER AND WIN32)
+    install(FILES "${SCITER_LIB_DIR}/sciter.dll"
+        DESTINATION bin
+    )
+endif()
