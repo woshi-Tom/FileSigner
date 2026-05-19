@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Compiler flags
 if(MSVC)
-    add_compile_options(/W3 /O2 /utf-8)
+    add_compile_options(/W3 /utf-8 $<$<CONFIG:Release>:/O2>)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")

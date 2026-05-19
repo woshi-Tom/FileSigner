@@ -19,7 +19,9 @@ static void print_usage(const char *prog)
     printf("  --out-dir <目录>          输出目录 (默认: ./certs)\n");
     printf("  --ca-password <密码>       CA 密钥密码 (默认: 无)\n");
     printf("  --signer-password <密码>   PFX 密码 (默认: FileSigner)\n");
-    printf("  --validity-days <天数>     签名证书有效天数 (默认: 90)\n\n");
+    printf("  --validity-days <天数>     签名证书有效天数 (默认: 90)\n");
+    printf("  --signer-cn <名称>        签名者姓名 (CN, 默认: FileSigner Code Signing)\n");
+    printf("  --signer-email <邮箱>      签名者邮箱 (SAN 扩展, 可选)\n\n");
     printf("签名:\n");
     printf("  --pfx <文件>               PFX/P12 证书文件\n");
     printf("  --password <密码>          PFX 密码\n");
@@ -48,6 +50,8 @@ int cli_main(int argc, char *argv[])
         const char *out_dir = "./certs";
         const char *ca_pw = NULL;
         const char *signer_pw = "FileSigner";
+        const char *signer_cn = NULL;
+        const char *signer_email = NULL;
         int validity = CERT_SIGNER_DEFAULT_DAYS;
 
         for (int i = 2; i < argc; i++) {
@@ -59,6 +63,10 @@ int cli_main(int argc, char *argv[])
                 signer_pw = argv[++i];
             else if (strcmp(argv[i], "--validity-days") == 0 && i + 1 < argc)
                 validity = atoi(argv[++i]);
+            else if (strcmp(argv[i], "--signer-cn") == 0 && i + 1 < argc)
+                signer_cn = argv[++i];
+            else if (strcmp(argv[i], "--signer-email") == 0 && i + 1 < argc)
+                signer_email = argv[++i];
         }
 
         if (!directory_exists(out_dir)) {
@@ -70,10 +78,12 @@ int cli_main(int argc, char *argv[])
 
         printf("正在生成证书...\n");
         printf("  CA CN: %s\n", CERT_CA_CN);
-        printf("  签名者 CN: %s (有效期: %d 天)\n", CERT_SIGNER_CN, validity);
+        printf("  签名者 CN: %s (有效期: %d 天)\n",
+               signer_cn ? signer_cn : CERT_SIGNER_CN, validity);
+        if (signer_email) printf("  签名者邮箱: %s\n", signer_email);
         printf("  输出目录: %s\n\n", out_dir);
 
-        if (cert_generate(out_dir, ca_pw, signer_pw, validity)) {
+        if (cert_generate(out_dir, ca_pw, signer_pw, validity, signer_cn, signer_email)) {
             printf("\n证书生成成功!\n");
             printf("\n下一步:\n");
             printf("  1. 将 %s/FileSigner_RootCA.cer 导入 Windows\n", out_dir);
@@ -142,7 +152,7 @@ int cli_main(int argc, char *argv[])
                 snprintf(outbuf, sizeof(outbuf), "%s/%s", output_dir, fname);
                 out = outbuf;
             }
-            ret = authenticode_sign(target, pfx_path, pfx_pw, ts_url, out) ? 0 : 1;
+            ret = authenticode_sign(target, pfx_path, pfx_pw, ts_url, out, NULL, NULL) ? 0 : 1;
         } else {
             fprintf(stderr, "错误: 目标不存在: %s\n", target);
             ret = 1;
