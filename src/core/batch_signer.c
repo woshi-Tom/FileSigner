@@ -77,6 +77,7 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
 
     wchar_t search_pattern[MAX_PATH_LEN];
     _snwprintf(search_pattern, MAX_PATH_LEN, L"%s\\*", wdir);
+    search_pattern[MAX_PATH_LEN - 1] = L'\0';
     free(wdir);
 
     WIN32_FIND_DATAW fd;
@@ -140,6 +141,27 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
     }
     closedir(dir);
 #endif
+}
+
+/* ------------------------------------------------------------------ */
+/* Status callback wrapper: pumps messages + calls batch progress CB   */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char *filename;
+    int current;
+    int total;
+    batch_progress_cb batch_cb;
+    void *batch_cb_data;
+} BatchStatusCtx;
+
+static void batch_status_cb(const char *status, void *user_data)
+{
+    BatchStatusCtx *ctx = (BatchStatusCtx *)user_data;
+
+    /* Call batch callback with status -4 to indicate per-file status */
+    if (ctx->batch_cb)
+        ctx->batch_cb(status, ctx->current, ctx->total, -4, ctx->batch_cb_data);
 }
 
 /* ------------------------------------------------------------------ */
@@ -214,7 +236,11 @@ int batch_sign(const char *dir_path,
         fprintf(stderr, "[batch_sign] calling authenticode_sign...\n");
         printf("  [%d/%d] Signing: %s\n", i + 1, list.count, filename);
 
-        if (authenticode_sign(filepath, pfx_path, pfx_password, timestamp_url, out)) {
+        BatchStatusCtx status_ctx = { filename, i + 1, list.count, cb, cb_data };
+        authenticode_status_cb status_cb_ptr = cb ? batch_status_cb : NULL;
+
+        if (authenticode_sign(filepath, pfx_path, pfx_password, timestamp_url, out,
+                               status_cb_ptr, &status_ctx)) {
             signed_count++;
             if (cb) cb(filename, i + 1, list.count, 1, cb_data);
         } else {
