@@ -57,6 +57,7 @@
 #define WM_APP_LOG          (WM_APP + 1)
 #define WM_APP_PROGRESS     (WM_APP + 2)
 #define WM_APP_SIGN_DONE    (WM_APP + 3)
+#define WM_APP_CERT_DONE    (WM_APP + 4)
 
 #define GUI_PATH_LEN    4096
 
@@ -84,6 +85,17 @@ typedef struct {
     int recursive;
     int force;
 } SignTask;
+
+typedef struct {
+    wchar_t wdir[GUI_PATH_LEN];
+    wchar_t wpw[256];
+    HWND hwnd;
+    char dir[GUI_PATH_LEN];
+    char pw[256];
+    char cn[256];
+    char email[256];
+    int days;
+} CertTask;
 
 static HINSTANCE g_hInst;
 static HFONT g_hFont;
@@ -358,13 +370,13 @@ create_cert_page(HWND parent)
               L"\u7B7E\u540D\u8005\u59D3\u540D (CN, \u53EF\u9009, \u9ED8\u8BA4: FileSigner Code Signing):",
               0, 8, y, W_CLIENT - 2*PAD, LH, 0);
     y += LH + 3;
-    make_edit(g_hPageCert, L"", 0, y, 280, IDC_EDIT_CERT_CN);
+    make_edit(g_hPageCert, L"", 0, y, W_EDIT, IDC_EDIT_CERT_CN);
     y += EH + 8;
 
     make_ctrl(g_hPageCert, L"STATIC", L"\u7B7E\u540D\u8005\u90AE\u7BB1 (\u53EF\u9009):",
               0, 8, y, W_CLIENT - 2*PAD, LH, 0);
     y += LH + 3;
-    make_edit(g_hPageCert, L"", 0, y, 280, IDC_EDIT_CERT_EMAIL);
+    make_edit(g_hPageCert, L"", 0, y, W_EDIT, IDC_EDIT_CERT_EMAIL);
     y += EH + 10;
 
     make_ctrl(g_hPageCert, L"STATIC", L"", SS_ETCHEDHORZ,
@@ -376,7 +388,7 @@ create_cert_page(HWND parent)
     y += EH + 10;
 
     make_ctrl(g_hPageCert, L"STATIC", L"",
-              SS_LEFT, 8, y, W_CLIENT - 2*PAD - 16, 140, IDC_LBL_CERT_STATUS);
+              SS_LEFT, 0, y, W_CLIENT - 2*PAD - 16, 140, IDC_LBL_CERT_STATUS);
 }
 
 /* ---------------------------------------------------------------- */
@@ -491,6 +503,22 @@ sign_thread_proc(LPVOID param)
     return 0;
 }
 
+static DWORD WINAPI
+cert_thread_proc(LPVOID param)
+{
+    CertTask *task = (CertTask *)param;
+    if (!task) return 0;
+
+    int ok = cert_generate(task->dir, NULL,
+                           task->pw[0] ? task->pw : NULL,
+                           task->days,
+                           task->cn[0] ? task->cn : NULL,
+                           task->email[0] ? task->email : NULL);
+
+    PostMessageW(task->hwnd, WM_APP_CERT_DONE, (WPARAM)ok, (LPARAM)task);
+    return 0;
+}
+
 /* ---------------------------------------------------------------- */
 /* WndProc                                                          */
 /* ---------------------------------------------------------------- */
@@ -531,6 +559,32 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_hThread = NULL;
         }
         EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), TRUE);
+        return 0;
+    }
+    case WM_APP_CERT_DONE: {
+        CertTask *task = (CertTask *)lParam;
+        int ok = (int)wParam;
+        if (ok) {
+            wchar_t msg[512];
+            swprintf(msg, 512,
+                     L"\u8BC1\u4E66\u751F\u6210\u6210\u529F!\n\n"
+                     L"\u751F\u6210\u6587\u4EF6\u4F4D\u4E8E: %s\n\n"
+                     L"%s"
+                     L"\u8BF7\u5C06 FileSigner_RootCA.cer \u5BFC\u5165\n"
+                     L"Windows \u53D7\u4FE1\u4EFB\u7684\u6839\u8BC1\u4E66\u9881\u53D1\u673A\u6784",
+                     task->wdir,
+                     task->wpw[0] ? L"PFX \u5BC6\u7801\u5DF2\u8BBE\u7F6E\uFF0C\u7B7E\u540D\u65F6\u8BF7\u4F7F\u7528\u76F8\u540C\u5BC6\u7801\u3002\n\n"
+                                   : L"PFX \u65E0\u5BC6\u7801\uFF0C\u7B7E\u540D\u65F6\u5BC6\u7801\u7559\u7A7A\u5373\u53EF\u3002\n\n");
+            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, msg);
+            MessageBoxW(task->hwnd, msg, L"\u6210\u529F", MB_OK | MB_ICONINFORMATION);
+        } else {
+            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
+                            L"\u751F\u6210\u5931\u8D25! \u8BF7\u68C0\u67E5\u8F93\u51FA\u76EE\u5F55\u548C\u53C2\u6570\u3002");
+            MessageBoxW(task->hwnd, L"\u8BC1\u4E66\u751F\u6210\u5931\u8D25\u3002",
+                        L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+        }
+        EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), TRUE);
+        free(task);
         return 0;
     }
     case WM_CREATE: {
@@ -818,6 +872,21 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 break;
             }
 
+            {
+                DWORD attr = GetFileAttributesW(wtarget);
+                if (attr == INVALID_FILE_ATTRIBUTES) {
+                    MessageBoxW(hwnd, L"\u76EE\u6807\u6587\u4EF6\u6216\u76EE\u5F55\u4E0D\u5B58\u5728\u3002",
+                                L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+                    break;
+                }
+                attr = GetFileAttributesW(wpfx);
+                if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                    MessageBoxW(hwnd, L"PFX \u8BC1\u4E66\u6587\u4EF6\u4E0D\u5B58\u5728\u3002",
+                                L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+                    break;
+                }
+            }
+
             if (g_hThread) {
                 MessageBoxW(hwnd, L"\u7B7E\u540D\u64CD\u4F5C\u6B63\u5728\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u7B49\u5F85\u5B8C\u6210\u3002",
                             L"\u63D0\u793A", MB_OK | MB_ICONINFORMATION);
@@ -854,8 +923,8 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
         }
         else if (id == IDC_BTN_TEST_TSA) {
-            EnableWindow(GetDlgItem(hwnd, IDC_BTN_TEST_TSA), FALSE);
-            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"\u6D4B\u8BD5\u4E2D...");
+            EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_TEST_TSA), FALSE);
+            SetDlgItemTextW(g_hPageSign, IDC_BTN_TEST_TSA, L"\u6D4B\u8BD5\u4E2D...");
 
             log_message(LOG_COLOR_INFO, L"\u5F00\u59CB\u6D4B\u8BD5 %d \u4E2A\u65F6\u95F4\u6233\u670D\u52A1\u5668...", TSA_SERVER_COUNT);
             UpdateWindow(g_hLog);
@@ -899,8 +968,8 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                             L"\u6D4B\u901F\u5931\u8D25", MB_OK | MB_ICONERROR);
             }
 
-            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"\u6D4B\u901F");
-            EnableWindow(GetDlgItem(hwnd, IDC_BTN_TEST_TSA), TRUE);
+            SetDlgItemTextW(g_hPageSign, IDC_BTN_TEST_TSA, L"\u6D4B\u901F");
+            EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_TEST_TSA), TRUE);
         }
         else if (id == IDC_BTN_BROWSE_CD) {
             wchar_t path[GUI_PATH_LEN] = {0};
@@ -934,45 +1003,34 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             int days = _wtoi(wdays_str);
             if (days <= 0) days = CERT_SIGNER_DEFAULT_DAYS;
 
-            char dir[GUI_PATH_LEN], pw[256], cn[256], email[256];
-            wide_to_utf8(wdir,   dir,   GUI_PATH_LEN);
-            wide_to_utf8(wpw,    pw,    256);
-            wide_to_utf8(wcn,    cn,    256);
-            wide_to_utf8(wemail, email, 256);
+            CertTask *task = calloc(1, sizeof(CertTask));
+            if (!task) break;
+            task->hwnd = hwnd;
+            wcscpy(task->wdir, wdir);
+            wcscpy(task->wpw, wpw);
+            wide_to_utf8(wdir,   task->dir,   GUI_PATH_LEN);
+            wide_to_utf8(wpw,    task->pw,    256);
+            wide_to_utf8(wcn,    task->cn,    256);
+            wide_to_utf8(wemail, task->email, 256);
+            task->days = days;
 
-            CreateDirectoryA(dir, NULL);
+            CreateDirectoryA(task->dir, NULL);
 
             EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), FALSE);
             SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
                             L"\u6B63\u5728\u751F\u6210...");
 
-            int ok = cert_generate(dir, NULL,
-                                   pw[0] ? pw : NULL,
-                                   days,
-                                   cn[0]  ? cn  : NULL,
-                                   email[0] ? email : NULL);
-
-            if (ok) {
-                wchar_t msg[512];
-                swprintf(msg, 512,
-                         L"\u8BC1\u4E66\u751F\u6210\u6210\u529F!\n\n"
-                         L"\u751F\u6210\u6587\u4EF6\u4F4D\u4E8E: %s\n\n"
-                         L"%s"
-                         L"\u8BF7\u5C06 FileSigner_RootCA.cer \u5BFC\u5165\n"
-                         L"Windows \u53D7\u4FE1\u4EFB\u7684\u6839\u8BC1\u4E66\u9881\u53D1\u673A\u6784",
-                         wdir,
-                         wpw[0] ? L"PFX \u5BC6\u7801\u5DF2\u8BBE\u7F6E\uFF0C\u7B7E\u540D\u65F6\u8BF7\u4F7F\u7528\u76F8\u540C\u5BC6\u7801\u3002\n\n"
-                                 : L"PFX \u65E0\u5BC6\u7801\uFF0C\u7B7E\u540D\u65F6\u5BC6\u7801\u7559\u7A7A\u5373\u53EF\u3002\n\n");
-                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, msg);
-                MessageBoxW(hwnd, msg, L"\u6210\u529F", MB_OK | MB_ICONINFORMATION);
-            } else {
+            HANDLE hThread = CreateThread(NULL, 0, cert_thread_proc, task, 0, NULL);
+            if (!hThread) {
+                free(task);
+                EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), TRUE);
                 SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
-                                L"\u751F\u6210\u5931\u8D25! \u8BF7\u68C0\u67E5\u8F93\u51FA\u76EE\u5F55\u548C\u53C2\u6570\u3002");
-                MessageBoxW(hwnd, L"\u8BC1\u4E66\u751F\u6210\u5931\u8D25\u3002",
+                                L"\u521B\u5EFA\u7EBF\u7A0B\u5931\u8D25");
+                MessageBoxW(hwnd, L"\u65E0\u6CD5\u521B\u5EFA\u8BC1\u4E66\u751F\u6210\u7EBF\u7A0B\u3002",
                             L"\u9519\u8BEF", MB_OK | MB_ICONERROR);
+            } else {
+                CloseHandle(hThread);
             }
-
-            EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), TRUE);
         }
 
         return 0;
