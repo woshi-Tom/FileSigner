@@ -40,6 +40,8 @@
 #define IDC_PROGRESS        213
 #define IDC_LIST_LOG        214
 #define IDC_LBL_LOG_TITLE   215
+#define IDC_SEP_SIGN        216
+#define IDC_CHK_DEBUG       217
 
 #define IDC_EDIT_CERT_DIR   301
 #define IDC_BTN_BROWSE_CD   302
@@ -50,6 +52,7 @@
 #define IDC_EDIT_CERT_CN    307
 #define IDC_EDIT_CERT_EMAIL 308
 #define IDC_LBL_CERT_TITLE  309
+#define IDC_SEP_CERT        310
 
 #define WM_APP_LOG          (WM_APP + 1)
 #define WM_APP_PROGRESS     (WM_APP + 2)
@@ -267,11 +270,11 @@ create_sign_page(HWND parent)
     make_ctrl(g_hPageSign, L"BUTTON", L"\u5F3A\u5236\u91CD\u65B0\u7B7E\u540D",
               BS_AUTOCHECKBOX, 170, y, 180, LH, IDC_CHK_FORCE);
     make_ctrl(g_hPageSign, L"BUTTON", L"\u8C03\u8BD5\u65E5\u5FD7",
-              BS_AUTOCHECKBOX, 360, y, 120, LH, 216);
+              BS_AUTOCHECKBOX, 360, y, 120, LH, IDC_CHK_DEBUG);
     y += LH + 12;
 
     make_ctrl(g_hPageSign, L"STATIC", L"", SS_ETCHEDHORZ,
-              0, y, W_CLIENT - 2*PAD, 2, 0);
+              0, y, W_CLIENT - 2*PAD, 2, IDC_SEP_SIGN);
     y += 10;
 
     make_ctrl(g_hPageSign, L"BUTTON", L"\u5F00\u59CB\u7B7E\u540D",
@@ -365,7 +368,7 @@ create_cert_page(HWND parent)
     y += EH + 10;
 
     make_ctrl(g_hPageCert, L"STATIC", L"", SS_ETCHEDHORZ,
-              0, y, W_CLIENT - 2*PAD, 2, 0);
+              0, y, W_CLIENT - 2*PAD, 2, IDC_SEP_CERT);
     y += 8;
 
     make_ctrl(g_hPageCert, L"BUTTON", L"\u751F\u6210\u8BC1\u4E66",
@@ -588,6 +591,19 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetWindowPos(g_hPageSign, NULL, PAD, 40, pw, ph, SWP_NOZORDER);
         if (g_hPageCert)
             SetWindowPos(g_hPageCert, NULL, PAD, 40, pw, ph, SWP_NOZORDER);
+        HWND hSep;
+        hSep = GetDlgItem(g_hPageSign, IDC_SEP_SIGN);
+        if (hSep) {
+            RECT r; GetWindowRect(hSep, &r);
+            MapWindowPoints(NULL, g_hPageSign, (POINT *)&r, 2);
+            SetWindowPos(hSep, NULL, 0, r.top, pw, 2, SWP_NOZORDER);
+        }
+        hSep = GetDlgItem(g_hPageCert, IDC_SEP_CERT);
+        if (hSep) {
+            RECT r; GetWindowRect(hSep, &r);
+            MapWindowPoints(NULL, g_hPageCert, (POINT *)&r, 2);
+            SetWindowPos(hSep, NULL, 0, r.top, pw, 2, SWP_NOZORDER);
+        }
         if (g_hPageSign) {
             HWND hProg = GetDlgItem(g_hPageSign, IDC_PROGRESS);
             HWND hLst  = GetDlgItem(g_hPageSign, IDC_LIST_LOG);
@@ -810,7 +826,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             int recursive = IsDlgButtonChecked(g_hPageSign, IDC_CHK_RECURSIVE) == BST_CHECKED;
             int force     = IsDlgButtonChecked(g_hPageSign, IDC_CHK_FORCE) == BST_CHECKED;
-            g_debug       = IsDlgButtonChecked(g_hPageSign, 216) == BST_CHECKED;
+            g_debug       = IsDlgButtonChecked(g_hPageSign, IDC_CHK_DEBUG) == BST_CHECKED;
 
             SignTask *task = calloc(1, sizeof(SignTask));
             if (!task) break;
