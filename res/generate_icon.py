@@ -100,9 +100,9 @@ def draw_shield(pixels, w, h, cx, cy, size):
                     # Gradient: lighter at top, darker at bottom
                     t = (y - (cy - size * 0.4)) / (size * 0.8)
                     t = max(0, min(1, t))
-                    r = int(70 + (20 - 70) * t)
-                    g = int(155 + (100 - 155) * t)
-                    b = int(245 + (200 - 245) * t)
+                    r = int(140 + (80 - 140) * t)
+                    g = int(170 + (120 - 170) * t)
+                    b = int(220 + (190 - 220) * t)
                     pixels[y][x] = (r, g, b, 255)
             else:  # bottom half - taper
                 taper = max(0.1, 1.0 - (py / (size * 0.45)) * 0.7)
@@ -110,9 +110,9 @@ def draw_shield(pixels, w, h, cx, cy, size):
                 if adj_nx * adj_nx + ny_bot * ny_bot < 0.92:
                     t = (y - (cy - size * 0.4)) / (size * 0.8)
                     t = max(0, min(1, t))
-                    r = int(70 + (20 - 70) * t)
-                    g = int(155 + (100 - 155) * t)
-                    b = int(245 + (200 - 245) * t)
+                    r = int(140 + (80 - 140) * t)
+                    g = int(170 + (120 - 170) * t)
+                    b = int(220 + (190 - 220) * t)
                     pixels[y][x] = (r, g, b, 255)
 
     # Draw shield border
@@ -131,7 +131,7 @@ def draw_shield(pixels, w, h, cx, cy, size):
         for d in range(-1, 2):
             for e in range(-1, 2):
                 if 0 <= bx + d < w and 0 <= by + e < h:
-                    pixels[by + e][bx + d] = (15, 60, 160, 255)
+                    pixels[by + e][bx + d] = (60, 72, 180, 255)
 
     # Draw checkmark
     cm_size = size * 0.35
@@ -168,7 +168,7 @@ def draw_shield(pixels, w, h, cx, cy, size):
 
     # Add subtle inner highlight (top-left glow)
     draw_filled_circle(pixels, w, h, cx - size * 0.15, cy - size * 0.2,
-                       size * 0.12, (120, 190, 255), 60)
+                       size * 0.12, (160, 190, 255), 80)
 
 def generate_icon(size):
     """Generate icon pixels at given size."""

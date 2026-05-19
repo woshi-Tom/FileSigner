@@ -1,6 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #define UNICODE
 #include <windows.h>
+#include <dwmapi.h>
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
 #include <commdlg.h>
 #include <shlobj.h>
 #include <commctrl.h>
@@ -125,15 +129,8 @@ static void
 log_scroll_bottom(void)
 {
     int count = (int)SendMessageW(g_hLog, LB_GETCOUNT, 0, 0);
-    if (count <= 0) return;
-    RECT rc;
-    GetClientRect(g_hLog, &rc);
-    int itemH = (int)SendMessageW(g_hLog, LB_GETITEMHEIGHT, 0, 0);
-    if (itemH <= 0) itemH = 16;
-    int visible = rc.bottom / itemH;
-    int top = count - visible;
-    if (top < 0) top = 0;
-    SendMessageW(g_hLog, LB_SETTOPINDEX, top, 0);
+    if (count > 0)
+        SendMessageW(g_hLog, LB_SETTOPINDEX, count - 1, 0);
 }
 
 static void
@@ -507,7 +504,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (wmsg) {
             int idx = (int)SendMessageW(g_hLog, LB_ADDSTRING, 0, (LPARAM)wmsg);
             SendMessageW(g_hLog, LB_SETITEMDATA, (WPARAM)idx, wParam);
-            SendMessageW(g_hLog, LB_SETTOPINDEX, idx, 0);
+            log_scroll_bottom();
             free(wmsg);
         }
         return 0;
@@ -560,6 +557,45 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SetWindowSubclass(g_hPageCert, page_subclass, 0, 0);
         switch_tab(0);
 
+        /* Enable dark title bar (Win10 20H1+) */
+        BOOL dark = TRUE;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+
+        return 0;
+    }
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO *mmi = (MINMAXINFO *)lParam;
+        mmi->ptMinTrackSize.x = 800;
+        mmi->ptMinTrackSize.y = 720;
+        return 0;
+    }
+    case WM_SIZE: {
+        int cw = LOWORD(lParam), ch = HIWORD(lParam);
+        if (g_hTab)
+            SetWindowPos(g_hTab, NULL, 0, 0, cw, 38, SWP_NOZORDER);
+        int pw = cw - 2 * PAD;
+        int ph = ch - 50;
+        if (g_hPageSign)
+            SetWindowPos(g_hPageSign, NULL, PAD, 40, pw, ph, SWP_NOZORDER);
+        if (g_hPageCert)
+            SetWindowPos(g_hPageCert, NULL, PAD, 40, pw, ph, SWP_NOZORDER);
+        if (g_hPageSign) {
+            HWND hProg = GetDlgItem(g_hPageSign, IDC_PROGRESS);
+            HWND hLst  = GetDlgItem(g_hPageSign, IDC_LIST_LOG);
+            if (hProg) {
+                RECT r; GetWindowRect(hProg, &r);
+                MapWindowPoints(NULL, g_hPageSign, (POINT *)&r, 2);
+                SetWindowPos(hProg, NULL, 0, r.top, pw, 24, SWP_NOZORDER);
+            }
+            if (hLst) {
+                RECT r; GetWindowRect(hLst, &r);
+                MapWindowPoints(NULL, g_hPageSign, (POINT *)&r, 2);
+                int lh = ph - r.top - 8;
+                if (lh < 50) lh = 50;
+                SetWindowPos(hLst, NULL, 0, r.top, pw, lh, SWP_NOZORDER);
+            }
+        }
+        InvalidateRect(hwnd, NULL, TRUE);
         return 0;
     }
     case WM_CTLCOLORSTATIC: {

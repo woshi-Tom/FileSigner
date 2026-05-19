@@ -77,6 +77,7 @@ if(WIN32)
         crypt32
         comctl32
         ole32
+        dwmapi
     )
 endif()
 
