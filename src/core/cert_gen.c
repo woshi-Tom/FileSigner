@@ -144,7 +144,8 @@ static X509* create_ca_cert(EVP_PKEY *pkey)
 
 /* Create code signing certificate signed by the CA */
 static X509* create_signer_cert(EVP_PKEY *signer_key, X509 *ca_cert,
-                                 EVP_PKEY *ca_key, int validity_days)
+                                 EVP_PKEY *ca_key, int validity_days,
+                                 const char *signer_cn, const char *signer_email)
 {
     X509 *cert = X509_new();
     if (!cert) return NULL;
@@ -167,9 +168,10 @@ static X509* create_signer_cert(EVP_PKEY *signer_key, X509 *ca_cert,
     X509_set_pubkey(cert, signer_key);
 
     /* Subject name */
+    const char *cn = (signer_cn && signer_cn[0]) ? signer_cn : CERT_SIGNER_CN;
     X509_NAME *name = X509_get_subject_name(cert);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                                (unsigned char *)CERT_SIGNER_CN, -1, -1, 0);
+                                (unsigned char *)cn, -1, -1, 0);
     X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
                                 (unsigned char *)"FileSigner", -1, -1, 0);
 
@@ -182,6 +184,13 @@ static X509* create_signer_cert(EVP_PKEY *signer_key, X509 *ca_cert,
     add_ext_issuer(cert, ca_cert, NID_ext_key_usage, "codeSigning");
     add_ext_issuer(cert, ca_cert, NID_subject_key_identifier, "hash");
     add_ext_issuer(cert, ca_cert, NID_authority_key_identifier, "keyid:always");
+
+    /* SubjectAlternativeName with email (if provided) */
+    if (signer_email && signer_email[0]) {
+        char san_buf[512];
+        snprintf(san_buf, sizeof(san_buf), "email:%s", signer_email);
+        add_ext_issuer(cert, ca_cert, NID_subject_alt_name, san_buf);
+    }
 
     /* Sign with CA key */
     if (!X509_sign(cert, ca_key, EVP_sha256())) {
@@ -233,7 +242,9 @@ static int write_pfx(const char *path, EVP_PKEY *key, X509 *cert,
 int cert_generate(const char *output_dir,
                   const char *ca_password,
                   const char *signer_password,
-                  int validity_days)
+                  int validity_days,
+                  const char *signer_cn,
+                  const char *signer_email)
 {
     EVP_PKEY *ca_key = NULL, *signer_key = NULL;
     X509 *ca_cert = NULL, *signer_cert = NULL;
@@ -262,7 +273,8 @@ int cert_generate(const char *output_dir,
     }
 
     /* Create signer certificate */
-    signer_cert = create_signer_cert(signer_key, ca_cert, ca_key, validity_days);
+    signer_cert = create_signer_cert(signer_key, ca_cert, ca_key, validity_days,
+                                      signer_cn, signer_email);
     if (!signer_cert) {
         fprintf(stderr, "Failed to create signer certificate\n");
         goto cleanup;
@@ -294,8 +306,28 @@ int cert_generate(const char *output_dir,
     printf("  Created: %s\n", path);
 
     snprintf(path, sizeof(path), "%s/FileSigner_Signer.pfx", output_dir);
-    if (!write_pfx(path, signer_key, signer_cert, ca_cert, signer_password)) {
-        fprintf(stderr, "Failed to write PFX file\n"); goto cleanup;
+    {
+        const char *friendly = (signer_cn && signer_cn[0]) ? signer_cn : CERT_SIGNER_CN;
+        PKCS12 *p12_tmp = NULL;
+        /* write_pfx uses CERT_SIGNER_CN as friendly name; override via re-implementation */
+        STACK_OF(X509) *extra = sk_X509_new_null();
+        if (extra) sk_X509_push(extra, ca_cert);
+        p12_tmp = PKCS12_create((char *)signer_password, friendly,
+                                signer_key, signer_cert, extra, 0, 0, 0, 0, 0);
+        if (extra) sk_X509_free(extra);
+        if (!p12_tmp) {
+            fprintf(stderr, "Failed to write PFX file\n"); goto cleanup;
+        }
+        FILE *pfx_fp = fopen_utf8(path, "wb");
+        if (!pfx_fp) { PKCS12_free(p12_tmp); goto cleanup; }
+        if (!i2d_PKCS12_fp(pfx_fp, p12_tmp)) {
+            fclose(pfx_fp);
+            PKCS12_free(p12_tmp);
+            fprintf(stderr, "Failed to write PFX file\n");
+            goto cleanup;
+        }
+        fclose(pfx_fp);
+        PKCS12_free(p12_tmp);
     }
     printf("  Created: %s\n", path);
 

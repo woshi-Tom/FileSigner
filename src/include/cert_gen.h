@@ -16,6 +16,8 @@
  * ca_password    — password to encrypt CA private key (NULL = no password)
  * signer_password — password to encrypt PFX
  * validity_days  — code signing cert validity in days (0 = default 90)
+ * signer_cn      — custom CN for signer cert (NULL = default "FileSigner Code Signing")
+ * signer_email   — email for SubjectAlternativeName (NULL = skip)
  *
  * Writes:
  *   FileSigner_RootCA.cer
@@ -29,6 +31,8 @@
 int cert_generate(const char *output_dir,
                   const char *ca_password,
                   const char *signer_password,
-                  int validity_days);
+                  int validity_days,
+                  const char *signer_cn,
+                  const char *signer_email);
 
 #endif /* CERT_GEN_H */
