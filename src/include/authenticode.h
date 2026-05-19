@@ -15,6 +15,12 @@
 #define SPC_INDIVIDUAL_PURPOSE   "1.3.6.1.4.1.311.2.1.21"
 
 /*
+ * Status callback for progress reporting during signing.
+ * Called at each major step so the caller can update UI / process messages.
+ */
+typedef void (*authenticode_status_cb)(const char *status, void *user_data);
+
+/*
  * Sign a PE file with Authenticode.
  *
  * pe_path         — path to the PE (EXE/DLL) file
@@ -22,6 +28,8 @@
  * pfx_password    — PFX password
  * timestamp_url   — RFC 3161 timestamp server URL (NULL to skip timestamping)
  * output_path     — output path for signed PE (NULL = overwrite original)
+ * status_cb       — optional progress callback (NULL = no callback)
+ * cb_data         — user data for callback
  *
  * Returns 1 on success, 0 on failure.
  */
@@ -29,7 +37,9 @@ int authenticode_sign(const char *pe_path,
                       const char *pfx_path,
                       const char *pfx_password,
                       const char *timestamp_url,
-                      const char *output_path);
+                      const char *output_path,
+                      authenticode_status_cb status_cb,
+                      void *cb_data);
 
 /*
  * Verify an Authenticode-signed PE file.

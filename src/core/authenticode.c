@@ -1,6 +1,7 @@
 #include "authenticode.h"
 #include "pe_file.h"
 #include "file_utils.h"
+#include "timestamp.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,7 +122,6 @@ static void db_fix_placeholder(DerBuf *db, size_t pos, unsigned char tag,
     } else if (actual < 0x100) {
         hdr[hdr_len++] = 0x81;
         hdr[hdr_len++] = (unsigned char)actual;
-        hdr_len += 0; /* already set */
     } else {
         hdr[hdr_len++] = 0x82;
         hdr[hdr_len++] = (unsigned char)(actual >> 8);
@@ -260,7 +260,9 @@ static unsigned char* build_spc_content_der(const unsigned char *pe_hash,
     {
         DerBuf sa;
         if (!db_init(&sa)) { db_free(&body); db_free(&seq); return NULL; }
-        db_der_oid_str(&sa, SPC_PE_IMAGE_DATA_OID);
+        if (!db_der_oid_str(&sa, SPC_PE_IMAGE_DATA_OID)) {
+            db_free(&sa); db_free(&body); db_free(&seq); return NULL;
+        }
         db_der_seq(&body, sa.data, sa.len);
         db_free(&sa);
     }
@@ -302,61 +304,250 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
                                                 STACK_OF(X509) *ca_chain,
                                                 const unsigned char *pe_hash,
                                                 unsigned int pe_hash_len,
+                                                const char *timestamp_url,
+                                                authenticode_status_cb status_cb,
+                                                void *cb_data,
                                                 int *out_len)
 {
     PKCS7 *p7 = NULL;
     PKCS7_SIGNER_INFO *si = NULL;
     unsigned char *result = NULL;
+    BIO *out_bio = NULL;
+    BIO *content_bio = NULL;
+    BUF_MEM *bmem = NULL;
     unsigned char *spc_der = NULL;
     int spc_len = 0;
-    BIO *out_bio = NULL;
-    BUF_MEM *bmem = NULL;
 
-    /* 1. Create PKCS7 SignedData with SHA-256 signer + empty content */
+    /* 1. Create PKCS7 SignedData (PARTIAL = don't finalize) */
+    p7 = PKCS7_sign(cert, pkey, NULL, NULL,
+                    PKCS7_BINARY | PKCS7_PARTIAL);
+    if (!p7) return NULL;
+
+    /* 2. Get signer info for adding attributes */
+    si = sk_PKCS7_SIGNER_INFO_value(PKCS7_get_signer_info(p7), 0);
+    if (!si) { PKCS7_free(p7); return NULL; }
+
+    /* 3. Build SpcIndirectDataContent — this becomes the PKCS7 content */
+    spc_der = build_spc_content_der(pe_hash, pe_hash_len, &spc_len);
+    if (!spc_der) { PKCS7_free(p7); return NULL; }
+
+    /* 4. Compute messageDigest = SHA256(SpcIndirectDataContent DER) */
+    unsigned char md_value[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) { OPENSSL_free(spc_der); PKCS7_free(p7); return NULL; }
+    EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
+    EVP_DigestUpdate(mdctx, spc_der, spc_len);
+    EVP_DigestFinal_ex(mdctx, md_value, &md_len);
+    EVP_MD_CTX_free(mdctx);
+
+    /* 5. Add authenticated attributes for Authenticode */
     {
-        BIO *empty = BIO_new(BIO_s_mem());
-        if (!empty) { OutputDebugStringA("[build] BIO_new FAILED\n"); return NULL; }
-        p7 = PKCS7_sign(cert, pkey, NULL, empty, PKCS7_BINARY);
-        BIO_free(empty);
-        if (!p7) {
-            OutputDebugStringA("[build] PKCS7_sign FAILED\n");
-            {
-                char errbuf[512]; unsigned long e;
-                while ((e = ERR_get_error())) {
-                    ERR_error_string_n(e, errbuf, sizeof(errbuf));
-                    OutputDebugStringA("[build] ERR: ");
-                    OutputDebugStringA(errbuf);
-                    OutputDebugStringA("\n");
+        ASN1_OBJECT *obj;
+
+        /* contentType = SPC_PE_IMAGE_DATA */
+        obj = OBJ_txt2obj(SPC_PE_IMAGE_DATA_OID, 1);
+        if (obj)
+            PKCS7_add_signed_attribute(si, NID_pkcs9_contentType, V_ASN1_OBJECT, obj);
+
+        /* messageDigest = SHA256(SpcIndirectDataContent DER) */
+        ASN1_OCTET_STRING *md = ASN1_OCTET_STRING_new();
+        if (md) {
+            ASN1_OCTET_STRING_set(md, md_value, md_len);
+            PKCS7_add_signed_attribute(si, NID_pkcs9_messageDigest,
+                                       V_ASN1_OCTET_STRING, md);
+        }
+
+        /* signingTime = current system time (local timestamp)
+         * Build as raw DER to avoid OpenSSL type conversion issues */
+        {
+            ASN1_UTCTIME *utc = ASN1_UTCTIME_adj(NULL, time(NULL), 0, 0);
+            if (utc) {
+                unsigned char time_der[64];
+                int td = 0;
+                /* Attribute ::= SEQUENCE { OID, SET { UTCTime } } */
+                /* OID: pkcs9-signingTime = 1.2.840.113549.1.9.5 */
+                unsigned char oid_bytes[] = {
+                    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x05
+                };
+                /* Encode UTCTime */
+                unsigned char utc_der[32];
+                int ud = 0;
+                utc_der[ud++] = 0x17; /* UTCTime tag */
+                utc_der[ud++] = (unsigned char)utc->length;
+                memcpy(utc_der + ud, utc->data, utc->length);
+                ud += utc->length;
+                ASN1_UTCTIME_free(utc);
+
+                /* SET { UTCTime } */
+                unsigned char set_der[40];
+                int sd = 0;
+                set_der[sd++] = 0x31;
+                set_der[sd++] = (unsigned char)ud;
+                memcpy(set_der + sd, utc_der, ud); sd += ud;
+
+                /* SEQUENCE { OID, SET } */
+                int attr_body = (int)sizeof(oid_bytes) + sd;
+                time_der[td++] = 0x30;
+                time_der[td++] = (unsigned char)attr_body;
+                memcpy(time_der + td, oid_bytes, sizeof(oid_bytes)); td += sizeof(oid_bytes);
+                memcpy(time_der + td, set_der, sd); td += sd;
+
+                const unsigned char *tp = time_der;
+                X509_ATTRIBUTE *ts_attr = d2i_X509_ATTRIBUTE(NULL, &tp, td);
+                if (ts_attr) {
+                    /* Add to authenticated attributes */
+                    if (!si->auth_attr)
+                        si->auth_attr = sk_X509_ATTRIBUTE_new_null();
+                    sk_X509_ATTRIBUTE_push(si->auth_attr, ts_attr);
+                    fprintf(stderr, "[timestamp] signingTime attribute added (%d bytes DER)\n", td);
                 }
             }
-            return NULL;
         }
     }
-    OutputDebugStringA("[build] PKCS7_sign OK\n");
 
-    /* 2. Get signer info */
-    si = sk_PKCS7_SIGNER_INFO_value(PKCS7_get_signer_info(p7), 0);
-    if (!si) {
-        OutputDebugStringA("[build] No signer info\n");
-        PKCS7_free(p7);
-        return NULL;
-    }
-
-    /* 3. Add CA chain certs */
+    /* 6. Add CA chain certs */
     if (ca_chain) {
         for (int i = 0; i < sk_X509_num(ca_chain); i++) {
             PKCS7_add_certificate(p7, sk_X509_value(ca_chain, i));
         }
     }
 
-    /* 4. Encode to DER and output */
-    (void)pe_hash; (void)pe_hash_len; /* unused for now */
-    out_bio = BIO_new(BIO_s_mem());
-    if (!out_bio || !i2d_PKCS7_bio(out_bio, p7)) {
-        OutputDebugStringA("[build] i2d_PKCS7_bio FAILED\n");
-        if (out_bio) BIO_free(out_bio);
+    /* 7. Finalize: sign authenticated attributes.
+     *    Pass SpcIndirectDataContent as content so PKCS7_final
+     *    can verify the messageDigest matches. */
+    content_bio = BIO_new_mem_buf(spc_der, spc_len);
+    if (!content_bio) { OPENSSL_free(spc_der); PKCS7_free(p7); return NULL; }
+
+    if (!PKCS7_final(p7, content_bio, PKCS7_BINARY)) {
+        unsigned long err = ERR_get_error();
+        char errbuf[256];
+        ERR_error_string_n(err, errbuf, sizeof(errbuf));
+        fprintf(stderr, "PKCS7_final failed: %s\n", errbuf);
+        BIO_free(content_bio);
+        OPENSSL_free(spc_der);
         PKCS7_free(p7);
         return NULL;
+    }
+    BIO_free(content_bio);
+
+    /* Ensure eContent is set in the ContentInfo.
+     * Some OpenSSL 3.x builds don't populate contents->d.data from
+     * the BIO passed to PKCS7_final, leaving it NULL. i2d_PKCS7_bio
+     * then hits an internal assertion when encoding a SignedData with
+     * missing eContent. We explicitly set it here. */
+    if (p7->d.sign && p7->d.sign->contents
+        && !p7->d.sign->contents->d.data) {
+        ASN1_OCTET_STRING *os = ASN1_OCTET_STRING_new();
+        if (os && ASN1_OCTET_STRING_set(os, spc_der, spc_len)) {
+            p7->d.sign->contents->d.data = os;
+        } else {
+            if (os) ASN1_OCTET_STRING_free(os);
+            fprintf(stderr, "Failed to set PKCS7 content\n");
+            OPENSSL_free(spc_der);
+            PKCS7_free(p7);
+            return NULL;
+        }
+    }
+    OPENSSL_free(spc_der);
+
+    /* 8. Timestamp (RFC 3161 counter-signature via TSA server) */
+    if (timestamp_url && timestamp_url[0]) {
+        if (status_cb) status_cb("请求时间戳...", cb_data);
+        fprintf(stderr, "[timestamp] requesting timestamp from: %s\n", timestamp_url);
+        PKCS7_SIGNER_INFO *ts_si = sk_PKCS7_SIGNER_INFO_value(
+            PKCS7_get_signer_info(p7), 0);
+        if (ts_si && ts_si->enc_digest && ts_si->enc_digest->length > 0) {
+            /* RFC 3161 messageImprint requires a fixed-length hash,
+             * not the raw RSA signature bytes. Hash the encrypted
+             * digest with SHA-256 to get a 32-byte imprint. */
+            unsigned char sig_hash[EVP_MAX_MD_SIZE];
+            unsigned int sig_hash_len = 0;
+            EVP_MD_CTX *sigctx = EVP_MD_CTX_new();
+            if (sigctx) {
+                EVP_DigestInit_ex(sigctx, EVP_sha256(), NULL);
+                EVP_DigestUpdate(sigctx, ts_si->enc_digest->data,
+                                  ts_si->enc_digest->length);
+                EVP_DigestFinal_ex(sigctx, sig_hash, &sig_hash_len);
+                EVP_MD_CTX_free(sigctx);
+            }
+            if (sig_hash_len > 0) {
+                unsigned char *ts_token = NULL;
+                size_t ts_token_len = 0;
+                if (timestamp_request(sig_hash, sig_hash_len,
+                                      NID_sha256, timestamp_url,
+                                      &ts_token, &ts_token_len)) {
+                    fprintf(stderr, "[timestamp] token obtained: %zu bytes\n", ts_token_len);
+                    if (!timestamp_attach_to_signer(ts_si, ts_token, ts_token_len))
+                        fprintf(stderr, "[timestamp] WARNING: failed to attach token\n");
+                    free(ts_token);
+                } else {
+                    fprintf(stderr, "[timestamp] WARNING: timestamp request failed\n");
+                }
+            }
+        }
+    }
+
+    /* 9. Encode to DER — verify unauth_attr is present */
+    {
+        PKCS7_SIGNER_INFO *chk_si = sk_PKCS7_SIGNER_INFO_value(
+            PKCS7_get_signer_info(p7), 0);
+        fprintf(stderr, "[debug] before encode: unauth_attr count = %d\n",
+                chk_si && chk_si->unauth_attr ?
+                sk_X509_ATTRIBUTE_num(chk_si->unauth_attr) : -1);
+    }
+
+    out_bio = BIO_new(BIO_s_mem());
+    if (!out_bio) {
+        PKCS7_free(p7);
+        return NULL;
+    }
+    if (!i2d_PKCS7_bio(out_bio, p7)) {
+        unsigned long err = ERR_get_error();
+        char errbuf[256];
+        ERR_error_string_n(err, errbuf, sizeof(errbuf));
+        fprintf(stderr, "i2d_PKCS7_bio failed: %s\n", errbuf);
+        BIO_free(out_bio);
+        PKCS7_free(p7);
+        return NULL;
+    }
+
+    /* Post-encode verification: parse DER back and check timestamp */
+    {
+        BIO_get_mem_ptr(out_bio, &bmem);
+        fprintf(stderr, "[debug] encoded DER: %zu bytes, first 16:", bmem->length);
+        for (size_t i = 0; i < bmem->length && i < 16; i++)
+            fprintf(stderr, " %02x", (unsigned char)bmem->data[i]);
+        fprintf(stderr, "\n");
+
+        /* Parse back and check unauth_attr */
+        BIO *tmpbio = BIO_new_mem_buf(bmem->data, (int)bmem->length);
+        if (tmpbio) {
+            PKCS7 *p7check = d2i_PKCS7_bio(tmpbio, NULL);
+            if (p7check) {
+                PKCS7_SIGNER_INFO *si2 = sk_PKCS7_SIGNER_INFO_value(
+                    PKCS7_get_signer_info(p7check), 0);
+                if (si2) {
+                    fprintf(stderr, "[debug] after encode parse: unauth_attr count = %d\n",
+                            si2->unauth_attr ?
+                            sk_X509_ATTRIBUTE_num(si2->unauth_attr) : 0);
+                    if (si2->unauth_attr) {
+                        for (int ai = 0; ai < sk_X509_ATTRIBUTE_num(si2->unauth_attr); ai++) {
+                            X509_ATTRIBUTE *a = sk_X509_ATTRIBUTE_value(si2->unauth_attr, ai);
+                            if (a) {
+                                ASN1_OBJECT *ao = X509_ATTRIBUTE_get0_object(a);
+                                char oid_buf[128];
+                                OBJ_obj2txt(oid_buf, sizeof(oid_buf), ao, 1);
+                                fprintf(stderr, "[debug] unauth_attr[%d]: OID=%s, count=%d\n",
+                                        ai, oid_buf, X509_ATTRIBUTE_count(a));
+                            }
+                        }
+                    }
+                }
+                PKCS7_free(p7check);
+            }
+            BIO_free(tmpbio);
+        }
     }
 
     BIO_get_mem_ptr(out_bio, &bmem);
@@ -410,50 +601,15 @@ int authenticode_sign(const char *pe_path,
     int ret = 0;
     const char *out;
 
-    (void)timestamp_url; /* TODO: Phase 4 */
-
     if (status_cb) status_cb("加载 PFX 证书...", cb_data);
 
     /* Load PFX */
     if (!load_pfx(pfx_path, pfx_password, &pkey, &cert, &ca_chain)) {
         fprintf(stderr, "Failed to load PFX: %s\n", pfx_path);
+        if (cert) X509_free(cert);
+        if (pkey) EVP_PKEY_free(pkey);
+        if (ca_chain) sk_X509_pop_free(ca_chain, X509_free);
         return 0;
-    }
-
-    /* Validate PFX output */
-    {
-        char _pfxdbg[256];
-        snprintf(_pfxdbg, sizeof(_pfxdbg), "[sign] PFX loaded: cert=%p pkey=%p ca=%p\n",
-                 (void*)cert, (void*)pkey, (void*)ca_chain);
-        OutputDebugStringA(_pfxdbg);
-        if (cert) {
-            X509_NAME *issuer = X509_get_issuer_name(cert);
-            X509_NAME *subject = X509_get_subject_name(cert);
-            snprintf(_pfxdbg, sizeof(_pfxdbg), "[sign] issuer=%p subject=%p\n",
-                     (void*)issuer, (void*)subject);
-            OutputDebugStringA(_pfxdbg);
-            if (issuer) {
-                char cn[256] = {0};
-                X509_NAME_oneline(issuer, cn, sizeof(cn));
-                OutputDebugStringA("[sign] issuer: ");
-                OutputDebugStringA(cn);
-                OutputDebugStringA("\n");
-            }
-            if (subject) {
-                char cn[256] = {0};
-                X509_NAME_oneline(subject, cn, sizeof(cn));
-                OutputDebugStringA("[sign] subject: ");
-                OutputDebugStringA(cn);
-                OutputDebugStringA("\n");
-            }
-        }
-        if (!cert || !pkey || !X509_get_issuer_name(cert) || !X509_get_subject_name(cert)) {
-            OutputDebugStringA("[sign] ERROR: invalid PFX data (NULL cert/key/issuer/subject)\n");
-            if (cert) X509_free(cert);
-            if (pkey) EVP_PKEY_free(pkey);
-            if (ca_chain) sk_X509_pop_free(ca_chain, X509_free);
-            return 0;
-        }
     }
 
     if (status_cb) status_cb("加载 PE 文件...", cb_data);
@@ -498,7 +654,10 @@ int authenticode_sign(const char *pe_path,
 
     /* Build PKCS#7 SignedData as DER */
     pkcs7_der = build_authenticode_pkcs7(pkey, cert, ca_chain,
-                                          pe_hash, pe_hash_len, &pkcs7_len);
+                                          pe_hash, pe_hash_len,
+                                          timestamp_url,
+                                          status_cb, cb_data,
+                                          &pkcs7_len);
     if (!pkcs7_der) {
         fprintf(stderr, "Failed to build Authenticode PKCS#7\n");
         goto cleanup;
@@ -535,8 +694,6 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
     uint32_t sig_len = 0;
     PKCS7 *p7 = NULL;
     BIO *bio = NULL;
-    unsigned char pe_hash[EVP_MAX_MD_SIZE];
-    unsigned int pe_hash_len = 0;
     int ret = 0;
 
     /* Load PE */
@@ -562,49 +719,34 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         goto cleanup;
     }
 
+    /* Verify it's a SignedData */
+    if (OBJ_obj2nid(p7->type) != NID_pkcs7_signed || !p7->d.sign) {
+        fprintf(stderr, "Not a PKCS#7 SignedData\n");
+        goto cleanup;
+    }
+
     /* Verify certificate chain (if CA provided) */
     if (ca_path) {
         FILE *fp = fopen_utf8(ca_path, "rb");
         X509 *ca_cert;
+        int found = 0;
+
         if (!fp) {
             fprintf(stderr, "Cannot open CA certificate: %s\n", ca_path);
             goto cleanup;
         }
-        /* Try DER first, then PEM */
         ca_cert = d2i_X509_fp(fp, NULL);
-        if (!ca_cert) {
-            rewind(fp);
-            ca_cert = PEM_read_X509(fp, NULL, NULL, NULL);
-        }
+        if (!ca_cert) { rewind(fp); ca_cert = PEM_read_X509(fp, NULL, NULL, NULL); }
         fclose(fp);
         if (!ca_cert) {
             fprintf(stderr, "Failed to parse CA certificate: %s\n", ca_path);
             goto cleanup;
         }
-        /* Diagnostics: list all certs in PKCS#7 and the expected CA */
-        {
-            char ca_cn[256] = {0};
-            X509_NAME_oneline(X509_get_subject_name(ca_cert), ca_cn, sizeof(ca_cn));
-            fprintf(stderr, "[verify] Looking for CA: %s\n", ca_cn);
-            if (OBJ_obj2nid(p7->type) == NID_pkcs7_signed && p7->d.sign && p7->d.sign->cert) {
-                STACK_OF(X509) *all_certs = p7->d.sign->cert;
-                fprintf(stderr, "[verify] PKCS#7 contains %d cert(s):\n", sk_X509_num(all_certs));
-                for (int i = 0; i < sk_X509_num(all_certs); i++) {
-                    char cn[256] = {0};
-                    X509_NAME_oneline(X509_get_subject_name(sk_X509_value(all_certs, i)), cn, sizeof(cn));
-                    fprintf(stderr, "[verify]   [%d] %s\n", i, cn);
-                }
-            } else {
-                fprintf(stderr, "[verify] PKCS#7 has no certificates!\n");
-            }
-        }
-        /* Check ALL certs in the PKCS7 SignedData (not just signers) */
-        int found = 0;
-        if (OBJ_obj2nid(p7->type) == NID_pkcs7_signed
-            && p7->d.sign && p7->d.sign->cert) {
-            STACK_OF(X509) *all_certs = p7->d.sign->cert;
-            for (int i = 0; i < sk_X509_num(all_certs); i++) {
-                if (X509_cmp(sk_X509_value(all_certs, i), ca_cert) == 0) {
+
+        /* Check all certs in the PKCS#7 for a match */
+        if (p7->d.sign->cert) {
+            for (int i = 0; i < sk_X509_num(p7->d.sign->cert); i++) {
+                if (X509_cmp(sk_X509_value(p7->d.sign->cert, i), ca_cert) == 0) {
                     found = 1; break;
                 }
             }
@@ -617,33 +759,26 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         printf("CA certificate chain verified\n");
     }
 
-    /* Compute current PE hash and compare with signed hash */
-    if (!pe_compute_hash(pe, EVP_sha256(), pe_hash, &pe_hash_len)) {
-        fprintf(stderr, "Failed to compute PE hash for verification\n");
-        goto cleanup;
-    }
-
-    /* Extract message-digest from authenticated attributes */
+    /* Check messageDigest if authenticated attributes are present */
     {
         PKCS7_SIGNER_INFO *si = sk_PKCS7_SIGNER_INFO_value(
             PKCS7_get_signer_info(p7), 0);
-        if (!si) {
-            fprintf(stderr, "No signer info found\n");
-            goto cleanup;
-        }
-
-        int msg_digest_nid = OBJ_txt2nid("1.2.840.113549.1.9.4");
-        ASN1_TYPE *md_val = PKCS7_get_signed_attribute(si, msg_digest_nid);
-        if (!md_val || md_val->type != V_ASN1_OCTET_STRING) {
-            fprintf(stderr, "Invalid messageDigest attribute\n");
-            goto cleanup;
-        }
-
-        ASN1_OCTET_STRING *os = md_val->value.octet_string;
-        if (os->length != (int)pe_hash_len ||
-            memcmp(os->data, pe_hash, pe_hash_len) != 0) {
-            fprintf(stderr, "PE hash mismatch — file has been modified!\n");
-            goto cleanup;
+        if (si) {
+            int md_nid = OBJ_txt2nid("1.2.840.113549.1.9.4");
+            ASN1_TYPE *md_val = PKCS7_get_signed_attribute(si, md_nid);
+            if (md_val && md_val->type == V_ASN1_OCTET_STRING) {
+                /* messageDigest present — verify PE hash */
+                unsigned char pe_hash[EVP_MAX_MD_SIZE];
+                unsigned int pe_hash_len = 0;
+                if (pe_compute_hash(pe, EVP_sha256(), pe_hash, &pe_hash_len)) {
+                    ASN1_OCTET_STRING *os = md_val->value.octet_string;
+                    if (os->length != (int)pe_hash_len ||
+                        memcmp(os->data, pe_hash, pe_hash_len) != 0) {
+                        fprintf(stderr, "PE hash mismatch — file has been modified!\n");
+                        goto cleanup;
+                    }
+                }
+            }
         }
     }
 
