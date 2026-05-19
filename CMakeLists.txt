@@ -8,6 +8,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 if(MSVC)
     add_compile_options(/W3 /utf-8 $<$<CONFIG:Release>:/O2>)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    # Sciter SDK sciter-om.h uses inline + nullptr, need explicit C11 mode + compat
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /std:c11 /Dnullptr=((void*)0)")
 else()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 -Wall -Wextra")

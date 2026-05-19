@@ -13,6 +13,12 @@
 #include <string.h>
 
 #define _CRT_SECURE_NO_WARNINGS
+
+/* sciter-om.h uses nullptr which is C++/C23 only — provide compat for C11 */
+#ifndef __cplusplus
+#define nullptr ((void*)0)
+#endif
+
 #include "sciter-x.h"
 #include "resource.h"
 
