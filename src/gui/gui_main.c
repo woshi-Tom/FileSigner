@@ -129,8 +129,16 @@ static void
 log_scroll_bottom(void)
 {
     int count = (int)SendMessageW(g_hLog, LB_GETCOUNT, 0, 0);
-    if (count > 0)
-        SendMessageW(g_hLog, LB_SETTOPINDEX, count - 1, 0);
+    if (count <= 0) return;
+    RECT rc;
+    GetClientRect(g_hLog, &rc);
+    int itemH = (int)SendMessageW(g_hLog, LB_GETITEMHEIGHT, 0, 0);
+    if (itemH <= 0) itemH = 16;
+    int visible = rc.bottom / itemH;
+    if (visible <= 0) visible = 1;
+    int top = count - visible;
+    if (top < 0) top = 0;
+    SendMessageW(g_hLog, LB_SETTOPINDEX, top, 0);
 }
 
 static void
@@ -505,6 +513,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             int idx = (int)SendMessageW(g_hLog, LB_ADDSTRING, 0, (LPARAM)wmsg);
             SendMessageW(g_hLog, LB_SETITEMDATA, (WPARAM)idx, wParam);
             log_scroll_bottom();
+            UpdateWindow(g_hLog);
             free(wmsg);
         }
         return 0;
@@ -816,8 +825,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), FALSE);
             SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
-            SendMessageW(g_hLog, LB_RESETCONTENT, 0, 0);
-            log_message(LOG_COLOR_INFO, L"\u5F00\u59CB\u7B7E\u540D...");
+            log_message(LOG_COLOR_INFO, L"\u2500\u2500\u2500 \u65B0\u7B7E\u540D %s \u2500\u2500\u2500", wtarget);
             if (g_debug)
                 log_message(LOG_COLOR_INFO, L"\u8C03\u8BD5\u65E5\u5FD7\u5DF2\u5F00\u542F");
 
