@@ -1,9 +1,6 @@
 #include <windows.h>
 #include "resource.h"
 
-// Application manifest
-CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "filesigner.exe.manifest"
-
 // Application icon
 IDI_MAIN_ICON ICON "app.ico"
 
