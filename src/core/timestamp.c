@@ -533,11 +533,12 @@ int timestamp_attach_to_signer(void *vsi,
 
     /*
      * Build Attribute DER: SEQUENCE { OID, SET { token } }
+     * OID goes at SEQUENCE level, BEFORE the SET.
      * Token goes directly into SET (no OCTET STRING wrapper).
      */
-    set_body = (size_t)oid_len + token_len;
+    set_body = token_len;
     set_hl = write_tl(tl, 0x31, set_body);  /* measure SET header */
-    seq_body = (size_t)set_hl + set_body;
+    seq_body = (size_t)oid_len + set_hl + set_body;
     seq_hl = write_tl(tl, 0x30, seq_body);  /* measure SEQ header */
     total = (size_t)seq_hl + seq_body;
 
@@ -546,9 +547,9 @@ int timestamp_attach_to_signer(void *vsi,
 
     p = der;
     write_tl(p, 0x30, seq_body); p += seq_hl;   /* SEQUENCE */
+    memcpy(p, oid_buf, oid_len);  p += oid_len; /* OID at SEQ level */
     write_tl(p, 0x31, set_body); p += set_hl;   /* SET */
-    memcpy(p, oid_buf, oid_len);  p += oid_len;
-    memcpy(p, token_der, token_len);
+    memcpy(p, token_der, token_len);              /* token inside SET */
 
     /* Parse DER into X509_ATTRIBUTE */
     {
