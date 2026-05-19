@@ -805,7 +805,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             for (int i = 0; i < TSA_SERVER_COUNT; i++) {
                 wchar_t wlabel[256];
                 MultiByteToWideChar(CP_UTF8, 0, g_tsa_servers[i].label, -1, wlabel, 256);
-                log_message(LOG_COLOR_INFO, L"  \u2192 %s...", wlabel);
+                log_message(LOG_COLOR_INFO, L"\u6D4B\u8BD5 %s\u4E2D\u2026\u2026", wlabel);
                 UpdateWindow(g_hLog);
 
                 DWORD t0 = GetTickCount();
@@ -813,13 +813,13 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 DWORD elapsed = GetTickCount() - t0;
 
                 if (ok) {
-                    log_message(LOG_COLOR_OK, L"    \u2714 %lu ms", elapsed);
+                    log_message(LOG_COLOR_OK, L"%s ----- \u5EF6\u8FDF %lu ms", wlabel, elapsed);
                     if (best_idx < 0 || (int)elapsed < best_latency) {
                         best_idx = i;
                         best_latency = (int)elapsed;
                     }
                 } else {
-                    log_message(LOG_COLOR_FAIL, L"    \u2718 N/A");
+                    log_message(LOG_COLOR_FAIL, L"%s ----- \u5931\u8D25", wlabel);
                 }
                 UpdateWindow(g_hLog);
             }
