@@ -478,13 +478,31 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
                                       NID_sha256, timestamp_url,
                                       &ts_token, &ts_token_len)) {
                     fprintf(stderr, "[timestamp] token obtained: %zu bytes\n", ts_token_len);
-                    if (!timestamp_attach_to_signer(ts_si, ts_token, ts_token_len))
-                        fprintf(stderr, "[timestamp] WARNING: failed to attach token\n");
+                    if (!timestamp_attach_to_signer(ts_si, ts_token, ts_token_len)) {
+                        fprintf(stderr, "[timestamp] ERROR: failed to attach timestamp token\n");
+                        free(ts_token);
+                        PKCS7_free(p7);
+                        return NULL;
+                    }
                     free(ts_token);
                 } else {
-                    fprintf(stderr, "[timestamp] WARNING: timestamp request failed\n");
+                    fprintf(stderr, "[timestamp] ERROR: timestamp server %s unreachable "
+                                    "or returned invalid response\n", timestamp_url);
+                    if (status_cb) status_cb("时间戳服务器连接失败", cb_data);
+                    PKCS7_free(p7);
+                    return NULL;
                 }
+            } else {
+                fprintf(stderr, "[timestamp] ERROR: failed to compute hash for timestamp request\n");
+                if (status_cb) status_cb("时间戳哈希计算失败", cb_data);
+                PKCS7_free(p7);
+                return NULL;
             }
+        } else {
+            fprintf(stderr, "[timestamp] ERROR: PKCS7 signer info or encrypted digest unavailable\n");
+            if (status_cb) status_cb("时间戳: 签名者信息无效", cb_data);
+            PKCS7_free(p7);
+            return NULL;
         }
     }
 

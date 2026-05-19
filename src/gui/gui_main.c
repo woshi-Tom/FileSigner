@@ -11,6 +11,7 @@
 
 #include "cert_gen.h"
 #include "authenticode.h"
+#include "timestamp.h"
 #include "batch_signer.h"
 #include "file_utils.h"
 #include "resource.h"
@@ -47,6 +48,8 @@ static LRESULT CALLBACK page_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 #define IDC_BTN_BROWSE_OUT  210
 #define IDC_BTN_SIGN        211
 #define IDC_CHK_DEBUG       214
+#define IDC_COMBO_TIMESTAMP 215
+#define IDC_BTN_TEST_TSA    216
 #define IDC_PROGRESS        212
 #define IDC_LIST_LOG        213
 
@@ -390,12 +393,22 @@ static void create_sign_page(HWND parent)
               0, y, 280, EH, IDC_EDIT_PASSWORD);
     y += EH + 6;
 
-    /* Timestamp */
-    make_ctrl(g_hPageSign, L"STATIC", L"时间戳服务器 URL (可选):", 0, 8, y, edit_x, LH, 0);
+    /* Timestamp server: combobox + test button */
+    make_ctrl(g_hPageSign, L"STATIC", L"时间戳服务器:", 0, 8, y, edit_x, LH, 0);
     y += LH + 3;
-    make_ctrl(g_hPageSign, L"EDIT", L"https://freetsa.org/tsr",
-              WS_BORDER | ES_AUTOHSCROLL,
-              0, y, W_EDIT + W_BROWSE + 6, EH, IDC_EDIT_TIMESTAMP);
+    {
+        HWND hCombo = CreateWindowExW(0, L"COMBOBOX", NULL,
+            WS_BORDER | WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_HASSTRINGS | WS_VSCROLL,
+            0, y, W_EDIT - 90, 250,
+            g_hPageSign, (HMENU)(INT_PTR)IDC_COMBO_TIMESTAMP, g_hInst, NULL);
+        if (hCombo) {
+            for (int i = 0; i < TSA_SERVER_COUNT; i++)
+                SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)g_tsa_servers[i].url);
+            SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
+        }
+    }
+    make_ctrl(g_hPageSign, L"BUTTON", L"测速",
+              BS_FLAT, W_EDIT - 86, y, 80, EH, IDC_BTN_TEST_TSA);
     y += EH + 6;
 
     /* Output dir */
@@ -773,7 +786,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             GetDlgItemTextW(g_hPageSign, IDC_EDIT_TARGET, wtarget, GUI_PATH_LEN);
             GetDlgItemTextW(g_hPageSign, IDC_EDIT_PFX, wpfx, GUI_PATH_LEN);
             GetDlgItemTextW(g_hPageSign, IDC_EDIT_PASSWORD, wpassword, 256);
-            GetDlgItemTextW(g_hPageSign, IDC_EDIT_TIMESTAMP, wts_url, 512);
+            GetDlgItemTextW(g_hPageSign, IDC_COMBO_TIMESTAMP, wts_url, 512);
             GetDlgItemTextW(g_hPageSign, IDC_EDIT_OUTDIR, woutdir, GUI_PATH_LEN);
 
             if (wcslen(wtarget) == 0) {
@@ -836,6 +849,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 EnableWindow(hBtn, TRUE);
                 MessageBoxW(hwnd, L"无法创建签名线程。", L"错误", MB_OK | MB_ICONERROR);
             }
+        }
+
+        else if (id == IDC_BTN_TEST_TSA) {
+            HWND hBtn = GetDlgItem(hwnd, IDC_BTN_TEST_TSA);
+            EnableWindow(hBtn, FALSE);
+            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"测试中...");
+
+            int latency = 0;
+            int best = timestamp_find_fastest(&latency);
+
+            if (best >= 0) {
+                HWND hCombo = GetDlgItem(g_hPageSign, IDC_COMBO_TIMESTAMP);
+                if (hCombo) {
+                    SendMessageW(hCombo, CB_SETCURSEL, best, 0);
+                }
+                wchar_t msg[128];
+                swprintf(msg, 128, L"最快: %S (%d ms)",
+                         g_tsa_servers[best].label, latency);
+                MessageBoxW(hwnd, msg, L"测速完成", MB_OK | MB_ICONINFORMATION);
+            } else {
+                MessageBoxW(hwnd, L"所有时间戳服务器均不可达。\n请检查网络连接。",
+                            L"测速失败", MB_OK | MB_ICONERROR);
+            }
+
+            SetDlgItemTextW(hwnd, IDC_BTN_TEST_TSA, L"测速");
+            EnableWindow(hBtn, TRUE);
         }
 
         else if (id == IDC_BTN_BROWSE_CD) {

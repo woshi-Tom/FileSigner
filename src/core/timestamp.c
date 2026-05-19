@@ -575,3 +575,132 @@ int timestamp_attach_to_signer(void *vsi,
             sk_X509_ATTRIBUTE_num(si->unauth_attr));
     return 1;
 }
+
+/* ------------------------------------------------------------------ */
+/* Test connectivity to a TSA server                                  */
+/* ------------------------------------------------------------------ */
+
+int timestamp_test_server(const char *url)
+{
+    if (!url || !url[0]) {
+        fprintf(stderr, "[timestamp] test: no URL provided\n");
+        return 0;
+    }
+
+    fprintf(stderr, "[timestamp] test: connecting to %s ...\n", url);
+
+#ifdef _WIN32
+    /* Build a minimal RFC 3161 request using a dummy SHA-256 hash */
+    unsigned char dummy_hash[32];
+    unsigned char *req_der = NULL;
+    size_t req_len = 0;
+    unsigned char *http_resp = NULL;
+    size_t resp_len = 0;
+    unsigned char *token = NULL;
+    size_t token_len = 0;
+
+    /* Deterministic dummy hash for testing */
+    memset(dummy_hash, 0xAB, sizeof(dummy_hash));
+
+    req_der = build_timestamp_request(dummy_hash, sizeof(dummy_hash),
+                                       NID_sha256, &req_len);
+    if (!req_der) {
+        fprintf(stderr, "[timestamp] test: failed to build request DER\n");
+        return 0;
+    }
+
+    /* Send HTTP POST */
+    http_resp = http_post(url, req_der, req_len, &resp_len);
+    if (!http_resp) {
+        fprintf(stderr, "[timestamp] test: HTTP POST failed — "
+                        "server unreachable or connection rejected\n");
+        free(req_der);
+        return 0;
+    }
+
+    /* Parse response to verify it's a valid TimeStampResp */
+    if (!parse_timestamp_response(http_resp, resp_len, &token, &token_len)) {
+        fprintf(stderr, "[timestamp] test: server response invalid "
+                        "(not a valid RFC 3161 TimeStampResp)\n");
+        free(http_resp);
+        free(req_der);
+        return 0;
+    }
+
+    /* Success: valid timestamp token received */
+    fprintf(stderr, "[timestamp] test: SUCCESS — server reachable, "
+                    "valid RFC 3161 response (%zu bytes)\n", token_len);
+    free(token);
+    free(http_resp);
+    free(req_der);
+    return 1;
+
+#else /* !_WIN32 */
+    (void)url;
+    fprintf(stderr, "[timestamp] test: WinHTTP required (Windows only)\n");
+    return 0;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
+/* Built-in TSA server list trusted by Windows                        */
+/* ------------------------------------------------------------------ */
+
+const TSAServer g_tsa_servers[TSA_SERVER_COUNT] = {
+    { "DigiCert",     "http://timestamp.digicert.com" },
+    { "Sectigo",      "http://timestamp.sectigo.com" },
+    { "GlobalSign",   "http://timestamp.globalsign.com/tsa/r6advanced1" },
+    { "Entrust",      "http://timestamp.entrust.net/TSS/RFC3161sha2TS" },
+    { "IdenTrust",    "http://timestamp.identrust.com" },
+    { "Certum",       "http://time.certum.pl" },
+};
+
+/* ------------------------------------------------------------------ */
+/* Find the fastest TSA server by measuring response latency          */
+/* ------------------------------------------------------------------ */
+
+int timestamp_find_fastest(int *out_latency_ms)
+{
+#ifdef _WIN32
+    int best_idx = -1;
+    int best_latency = 0;
+
+    fprintf(stderr, "[timestamp] latency test: checking %d servers...\n", TSA_SERVER_COUNT);
+
+    for (int i = 0; i < TSA_SERVER_COUNT; i++) {
+        fprintf(stderr, "[timestamp]   [%d/%d] %-12s ", i + 1, TSA_SERVER_COUNT,
+                g_tsa_servers[i].label);
+
+        DWORD t0 = GetTickCount();
+        int ok = timestamp_test_server(g_tsa_servers[i].url);
+        DWORD elapsed = GetTickCount() - t0;
+
+        if (ok) {
+            fprintf(stderr, "%lu ms OK\n", elapsed);
+            if (best_idx < 0 || (int)elapsed < best_latency) {
+                best_idx = i;
+                best_latency = (int)elapsed;
+            }
+        } else {
+            fprintf(stderr, "FAILED\n");
+        }
+    }
+
+    if (best_idx >= 0) {
+        fprintf(stderr, "[timestamp] fastest: %s (%s) at %d ms\n",
+                g_tsa_servers[best_idx].label,
+                g_tsa_servers[best_idx].url,
+                best_latency);
+        if (out_latency_ms) *out_latency_ms = best_latency;
+    } else {
+        fprintf(stderr, "[timestamp] all servers unreachable\n");
+        if (out_latency_ms) *out_latency_ms = -1;
+    }
+
+    return best_idx;
+#else
+    (void)out_latency_ms;
+    fprintf(stderr, "[timestamp] find_fastest: Windows only\n");
+    return -1;
+#endif
+}
