@@ -188,7 +188,7 @@ static unsigned char* build_timestamp_request(const unsigned char *digest,
 
 static unsigned char* http_post(const char *url,
                                  const unsigned char *body, size_t body_len,
-                                 size_t *resp_len)
+                                 size_t *resp_len, DWORD timeout_ms)
 {
     HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
     URL_COMPONENTS uc;
@@ -231,8 +231,12 @@ static unsigned char* http_post(const char *url,
         return NULL;
     }
 
-    /* Set timeouts: resolve=10s, connect=10s, send=15s, receive=15s */
-    WinHttpSetTimeouts(hSession, 10000, 10000, 15000, 15000);
+    /* Set timeouts from parameter */
+    {
+        DWORD t = timeout_ms > 0 ? timeout_ms : 10000;
+        DWORD half = t / 2;
+        WinHttpSetTimeouts(hSession, half, half, t, t);
+    }
 
     /* Connect */
     hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
@@ -450,7 +454,7 @@ int timestamp_request(const unsigned char *digest, size_t digest_len,
 
 #ifdef _WIN32
     /* Send HTTP POST */
-    http_resp = http_post(url, req_der, req_len, &resp_len);
+    http_resp = http_post(url, req_der, req_len, &resp_len, 10000);
     if (!http_resp) {
         fprintf(stderr, "[timestamp] HTTP POST failed\n");
         free(req_der);
@@ -610,7 +614,7 @@ int timestamp_test_server(const char *url)
     }
 
     /* Send HTTP POST */
-    http_resp = http_post(url, req_der, req_len, &resp_len);
+    http_resp = http_post(url, req_der, req_len, &resp_len, 4000);
     if (!http_resp) {
         fprintf(stderr, "[timestamp] test: HTTP POST failed — "
                         "server unreachable or connection rejected\n");
