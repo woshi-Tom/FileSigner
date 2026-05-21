@@ -25,6 +25,7 @@ CLAUDE.md
 
 # IDE
 .vs/
+CMakeSettings.json
 *.vcxproj.user
 *.sln.docstates
 *.suo

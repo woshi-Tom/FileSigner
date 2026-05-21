@@ -64,7 +64,7 @@ Windows 可执行文件（`.exe`、`.dll`）的数字签名是软件发布中的
 - **🔎 签名状态检测** — 自动跳过已签名的文件，支持 `--force` 强制重新签名
 - **🛡 签名验证** — 验证 PE 文件的 Authenticode 签名有效性
 - **🔑 生成自签名证书链** — 一键生成自签名根 CA + 代码签名证书（PFX），方便开发测试
-- **🖥 原生 Win32 GUI** — 双击即用的图形界面，支持 TSA 测速、进度显示、日志输出
+- **🖥 原生 Win32 GUI** — KDE Breeze 风格界面，支持 TSA 测速、进度显示、深色日志、关于/检查更新
 - **⚙ 命令行模式** — 同样一个可执行文件，传参数即进入 CLI 模式，适合 CI/CD 集成
 - **🌐 跨平台构建** — 支持 Windows（MSVC/MinGW）和 Linux/macOS（GCC/Clang）
 
@@ -216,7 +216,7 @@ cmake --build .
 
 ### 界面布局
 
-窗口顶部有两个标签页：**签名** 和 **生成证书**。
+窗口顶部为扁平按钮栏：**签名** | **生成证书** | **关于** | **检查更新**，采用 KDE Breeze 设计风格。点击按钮切换对应页面，日志区位于底部深色终端风格。
 
 #### 签名页
 
@@ -265,6 +265,10 @@ cmake --build .
 3. （可选）填写签名者名称和邮箱
 4. 点击"生成证书"
 5. 成功后会弹出提示，告知如何导入根 CA
+
+#### 关于与检查更新
+
+点击按钮栏右侧的 **关于** 查看版本信息，**检查更新** 通过 GitHub Releases API 自动检测新版本。
 
 ---
 
@@ -348,9 +352,9 @@ filesigner.exe
   │
   ├── cli.c                    ← CLI 模式：解析参数，调用核心模块
   │
-  ├── gui/gui_main.c           ← GUI 模式：原生 Win32 窗口，双标签页
-  │     ├── 签名标签页         → 调用 batch_sign / authenticode_sign
-  │     └── 证书标签页         → 调用 cert_generate
+  ├── gui/gui_main.c           ← GUI 模式：KDE Breeze 风格，扁平按钮栏切换页面
+  │     ├── 签名页             → 调用 batch_sign / authenticode_sign
+  │     └── 证书生成页         → 调用 cert_generate
   │
   ├── core/
   │   ├── pe_file.c            ← PE 文件解析：DOS/COFF/Optional Header、Certificate Table
@@ -367,8 +371,8 @@ filesigner.exe
 
 ### 设计特点
 
-- **双模式入口**：同一个可执行文件，不带参数 → 启动 GUI；带参数 → 进入 CLI 模式（`main.c` 第 16 行）
-- **非阻塞 GUI**：签名和证书生成在独立线程中执行，UI 保持响应（`gui_main.c`：`CreateThread`）
+- **双模式入口**：同一个可执行文件，不带参数 → 启动 GUI；带参数 → 进入 CLI 模式（`main.c`）
+- **非阻塞 GUI**：签名、证书生成、TSA 测速均在独立线程中执行，UI 保持响应（`gui_main.c`：`CreateThread`）
 - **进度回调机制**：`batch_progress_cb` 和 `authenticode_status_cb` 两层回调，让 GUI 实时更新进度和日志
 - **内存映射 PE 编辑**：`pe_file.c` 直接在内存中操作 PE 结构，避免临时文件
 - **纯 OpenSSL 实现**：不依赖 Windows SDK，跨平台构建成为可能
@@ -376,7 +380,7 @@ filesigner.exe
 ### 依赖
 
 - **OpenSSL 3.0+** — 加密运算、证书操作、PKCS#7/PKCS#12 处理
-- **Windows 特定**（仅 GUI 运行时）：`winhttp`（HTTP 请求）、`crypt32`（证书存储）、`comctl32`、`dwmapi`
+- **Windows 特定**（仅 GUI 运行时）：`winhttp`（HTTP 请求/更新检查）、`crypt32`（证书存储）、`comctl32`、`shell32`、`dwmapi`
 
 ---
 
