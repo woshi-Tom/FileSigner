@@ -220,7 +220,8 @@ cmake --build .
 
 #### 签名页
 
-![签名界面示意](docs/images/sign-tab.png)
+<img width="812" height="756" alt="image" src="https://github.com/user-attachments/assets/ea0c7d64-1220-4ee5-b015-4a0c56b59a32" />
+
 
 | 控件 | 说明 |
 |---|---|
@@ -245,7 +246,8 @@ cmake --build .
 
 #### 生成证书页
 
-![生成证书界面示意](docs/images/cert-tab.png)
+<img width="809" height="757" alt="image" src="https://github.com/user-attachments/assets/cb6f5d87-bccd-4d7e-b2e5-6bb6de579e9a" />
+
 
 | 控件 | 说明 |
 |---|---|
