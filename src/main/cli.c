@@ -6,7 +6,7 @@
 #include "batch_signer.h"
 #include "file_utils.h"
 
-#define VERSION "4.0.2"
+#define VERSION "4.1.0"
 
 static void print_usage(const char *prog)
 {
