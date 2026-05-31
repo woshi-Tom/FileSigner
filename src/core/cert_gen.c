@@ -25,7 +25,10 @@ static int add_ext(X509 *cert, int nid, const char *value)
     if (!ex)
         return 0;
 
-    X509_add_ext(cert, ex, -1);
+    if (!X509_add_ext(cert, ex, -1)) {
+        X509_EXTENSION_free(ex);
+        return 0;
+    }
     X509_EXTENSION_free(ex);
     return 1;
 }
@@ -43,7 +46,10 @@ static int add_ext_issuer(X509 *cert, X509 *issuer, int nid, const char *value)
     if (!ex)
         return 0;
 
-    X509_add_ext(cert, ex, -1);
+    if (!X509_add_ext(cert, ex, -1)) {
+        X509_EXTENSION_free(ex);
+        return 0;
+    }
     X509_EXTENSION_free(ex);
     return 1;
 }
@@ -155,8 +161,11 @@ static X509* create_signer_cert(EVP_PKEY *signer_key, X509 *ca_cert,
     /* Serial number (random) */
     ASN1_INTEGER *serial = X509_get_serialNumber(cert);
     BIGNUM *bn = BN_new();
-    BN_rand(bn, 64, 0, 0);
-    BN_to_ASN1_INTEGER(bn, serial);
+    if (!bn) { X509_free(cert); return NULL; }
+    if (!BN_rand(bn, 64, 0, 0) ||
+        !BN_to_ASN1_INTEGER(bn, serial)) {
+        BN_free(bn); X509_free(cert); return NULL;
+    }
     BN_free(bn);
 
     /* Validity */

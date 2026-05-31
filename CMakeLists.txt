@@ -4,10 +4,18 @@ project(FileSigner C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Build options
+option(ENABLE_ASAN "Enable AddressSanitizer (MSVC Debug only)" OFF)
+
 # Compiler flags
 if(MSVC)
     add_compile_options(/W3 /utf-8 $<$<CONFIG:Release>:/O2>)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    if(ENABLE_ASAN)
+        add_compile_options(/fsanitize=address /Zi)
+        add_link_options(/fsanitize=address)
+        message(STATUS "AddressSanitizer enabled")
+    endif()
 else()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 -Wall -Wextra")

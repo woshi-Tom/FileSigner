@@ -117,6 +117,17 @@ PE_FILE* pe_load(const char *path)
     /* Section headers */
     pe->sections = (SECTION_HEADER *)(raw + opt_offset + pe->coff->SizeOfOptionalHeader);
 
+    /* Validate section headers fit within file bounds */
+    {
+        size_t sections_size = (size_t)pe->coff->NumberOfSections * sizeof(SECTION_HEADER);
+        size_t sections_offset = opt_offset + pe->coff->SizeOfOptionalHeader;
+        if (pe->coff->NumberOfSections == 0 ||
+            sections_offset + sections_size > file_size) {
+            pe_free(pe);
+            return NULL;
+        }
+    }
+
     /* Certificate table */
     if (pe->cert_dir && pe->cert_dir->VirtualAddress && pe->cert_dir->Size) {
         pe->cert_offset = pe->cert_dir->VirtualAddress; /* RVA = raw offset for certs */
@@ -275,12 +286,8 @@ int pe_attach_signature(PE_FILE *pe, const unsigned char *sig_der, uint32_t sig_
             if (!new_data) return 0;
             pe->data = new_data;
             pe->size = new_file_size;
-            /* Re-base pointers after realloc */
+            /* Re-base dos pointer immediately — needed by the rebasing block below */
             pe->dos = (DOS_HEADER *)pe->data;
-            uint32_t pe_off = pe->dos->e_lfanew;
-            pe->coff = (COFF_HEADER *)(pe->data + pe_off + 4);
-            pe->sections = (SECTION_HEADER *)(pe->data + pe_off + 4
-                             + sizeof(COFF_HEADER) + pe->coff->SizeOfOptionalHeader);
         }
     } else {
         cert_write_offset = pe->size;
@@ -290,10 +297,6 @@ int pe_attach_signature(PE_FILE *pe, const unsigned char *sig_der, uint32_t sig_
         pe->data = new_data;
         pe->size = new_file_size;
         pe->dos = (DOS_HEADER *)pe->data;
-        uint32_t pe_off = pe->dos->e_lfanew;
-        pe->coff = (COFF_HEADER *)(pe->data + pe_off + 4);
-        pe->sections = (SECTION_HEADER *)(pe->data + pe_off + 4
-                         + sizeof(COFF_HEADER) + pe->coff->SizeOfOptionalHeader);
     }
 
     /* Write WIN_CERTIFICATE header */

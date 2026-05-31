@@ -6,7 +6,7 @@
 #include "batch_signer.h"
 #include "file_utils.h"
 
-#define VERSION "4.0.0"
+#define VERSION "4.0.1"
 
 static void print_usage(const char *prog)
 {
@@ -61,8 +61,15 @@ int cli_main(int argc, char *argv[])
                 ca_pw = argv[++i];
             else if (strcmp(argv[i], "--signer-password") == 0 && i + 1 < argc)
                 signer_pw = argv[++i];
-            else if (strcmp(argv[i], "--validity-days") == 0 && i + 1 < argc)
-                validity = atoi(argv[++i]);
+            else if (strcmp(argv[i], "--validity-days") == 0 && i + 1 < argc) {
+                char *endp;
+                long v = strtol(argv[++i], &endp, 10);
+                if (*endp != '\0' || v < 1 || v > 3650) {
+                    fprintf(stderr, "错误: --validity-days 必须是 1-3650 之间的整数\n");
+                    return 1;
+                }
+                validity = (int)v;
+            }
             else if (strcmp(argv[i], "--signer-cn") == 0 && i + 1 < argc)
                 signer_cn = argv[++i];
             else if (strcmp(argv[i], "--signer-email") == 0 && i + 1 < argc)
@@ -136,7 +143,10 @@ int cli_main(int argc, char *argv[])
         int ret;
         if (directory_exists(target)) {
             if (output_dir && !directory_exists(output_dir)) {
-                create_directory(output_dir);
+                if (!create_directory(output_dir)) {
+                    fprintf(stderr, "错误: 无法创建输出目录: %s\n", output_dir);
+                    return 1;
+                }
             }
             int count = batch_sign(target, pfx_path, pfx_pw, ts_url,
                                     output_dir, force, recursive, NULL, NULL);

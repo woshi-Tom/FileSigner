@@ -196,6 +196,7 @@ static unsigned char* http_post(const char *url,
     DWORD status_code = 0, size = sizeof(DWORD);
     DWORD bytes_available = 0, total_read = 0;
     unsigned char *result = NULL;
+    size_t buf_cap = 0;
 
     /* Convert URL to wide chars */
     int wlen = MultiByteToWideChar(CP_UTF8, 0, url, -1, NULL, 0);
@@ -291,12 +292,14 @@ static unsigned char* http_post(const char *url,
     fprintf(stderr, "[timestamp] HTTP %lu\n", (unsigned long)status_code);
 
     /* Read response body (both success and error) */
-    result = (unsigned char *)malloc(65536);
+    buf_cap = 65536;
+    result = (unsigned char *)malloc(buf_cap);
     if (!result) goto cleanup;
 
     while (WinHttpQueryDataAvailable(hRequest, &bytes_available) && bytes_available > 0) {
-        if (total_read + bytes_available > 65536) {
-            unsigned char *tmp = (unsigned char *)realloc(result, total_read + bytes_available + 4096);
+        if ((size_t)total_read + bytes_available > buf_cap) {
+            buf_cap = (size_t)total_read + bytes_available + 4096;
+            unsigned char *tmp = (unsigned char *)realloc(result, buf_cap);
             if (!tmp) break;
             result = tmp;
         }
@@ -390,16 +393,19 @@ static int parse_timestamp_response(const unsigned char *resp, size_t resp_len,
     if (p >= end) return 0;
     if (*p < 0x80) {
         size_t inner_len = *p;
+        if (p + 1 + inner_len > end) return 0;
         p += 1 + inner_len;
     } else if (*p == 0x81) {
         p++;
         if (p >= end) return 0;
         size_t inner_len = *p;
+        if (p + 1 + inner_len > end) return 0;
         p += 1 + inner_len;
     } else if (*p == 0x82) {
         p++;
         if (p + 1 >= end) return 0;
         size_t inner_len = ((size_t)p[0] << 8) | p[1];
+        if (p + 2 + inner_len > end) return 0;
         p += 2 + inner_len;
     } else {
         return 0;

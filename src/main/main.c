@@ -14,7 +14,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* If command-line arguments are present (beyond exe name), run CLI.
        Attach to the parent console so stdout/stderr output is visible. */
     if (__argc > 1) {
-        AttachConsole(ATTACH_PARENT_PROCESS);
+        if (!AttachConsole(ATTACH_PARENT_PROCESS))
+            AllocConsole();
         freopen("CONOUT$", "w", stdout);
         freopen("CONOUT$", "w", stderr);
         freopen("CONIN$", "r", stdin);

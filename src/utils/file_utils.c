@@ -229,11 +229,16 @@ int write_file(const char* filename, const unsigned char* data, size_t size) {
     wchar_t *wname = utf8_to_wide(filename);
     int ret = 0;
     if (wtmp && wname) {
-        /* Delete target first (MoveFileEx can't always replace) */
-        _wremove(wname);
-        ret = MoveFileW(wtmp, wname) ? 1 : 0;
+        /* ReplaceFileW atomically replaces the original; on failure the
+           original file remains intact (no data loss). */
+        if (ReplaceFileW(wname, wtmp, NULL, 0, NULL, NULL)) {
+            ret = 1;
+        } else {
+            _wremove(wtmp);
+        }
+    } else {
+        if (wtmp) _wremove(wtmp);
     }
-    if (!ret && wtmp) _wremove(wtmp);
     free(wtmp);
     free(wname);
     return ret;

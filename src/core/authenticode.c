@@ -100,10 +100,10 @@ static int db_tag(DerBuf *db, unsigned char tag, size_t body_len)
 /* Push current length as a placeholder, return position for later fix */
 static size_t db_push_len_placeholder(DerBuf *db)
 {
-    /* Reserve 5 bytes for tag + max length encoding */
+    /* Reserve 6 bytes for tag + max length encoding (tag + 0x84 + 4 bytes) */
     size_t pos = db->len;
-    unsigned char zeros[5] = {0};
-    db_raw(db, zeros, 5);
+    unsigned char zeros[6] = {0};
+    db_raw(db, zeros, 6);
     return pos;
 }
 
@@ -111,10 +111,10 @@ static size_t db_push_len_placeholder(DerBuf *db)
 static void db_fix_placeholder(DerBuf *db, size_t pos, unsigned char tag,
                                 size_t body_len)
 {
-    /* body_len = current_len - (pos + 5) */
-    size_t actual = db->len - pos - 5;
+    /* body_len = current_len - (pos + 6) */
+    size_t actual = db->len - pos - 6;
     /* Write the real tag+length at pos, then shift body */
-    unsigned char hdr[5];
+    unsigned char hdr[6];
     int hdr_len = 0;
     hdr[hdr_len++] = tag;
     if (actual < 0x80) {
@@ -122,17 +122,28 @@ static void db_fix_placeholder(DerBuf *db, size_t pos, unsigned char tag,
     } else if (actual < 0x100) {
         hdr[hdr_len++] = 0x81;
         hdr[hdr_len++] = (unsigned char)actual;
-    } else {
+    } else if (actual < 0x10000) {
         hdr[hdr_len++] = 0x82;
+        hdr[hdr_len++] = (unsigned char)(actual >> 8);
+        hdr[hdr_len++] = (unsigned char)actual;
+    } else if (actual < 0x1000000) {
+        hdr[hdr_len++] = 0x83;
+        hdr[hdr_len++] = (unsigned char)(actual >> 16);
+        hdr[hdr_len++] = (unsigned char)(actual >> 8);
+        hdr[hdr_len++] = (unsigned char)actual;
+    } else {
+        hdr[hdr_len++] = 0x84;
+        hdr[hdr_len++] = (unsigned char)(actual >> 24);
+        hdr[hdr_len++] = (unsigned char)(actual >> 16);
         hdr[hdr_len++] = (unsigned char)(actual >> 8);
         hdr[hdr_len++] = (unsigned char)actual;
     }
     /* Copy header into position (overwriting zeros) */
     memcpy(db->data + pos, hdr, hdr_len);
-    /* Shift body left if header is shorter than 5 bytes */
-    if (hdr_len < 5) {
-        size_t shift = 5 - hdr_len;
-        memmove(db->data + pos + hdr_len, db->data + pos + 5, actual);
+    /* Shift body left if header is shorter than 6 bytes */
+    if (hdr_len < 6) {
+        size_t shift = 6 - hdr_len;
+        memmove(db->data + pos + hdr_len, db->data + pos + 6, actual);
         db->len -= shift;
     }
     (void)body_len;
@@ -267,26 +278,38 @@ static unsigned char* build_spc_content_der(const unsigned char *pe_hash,
         db_free(&sa);
     }
 
-    /* DigestInfo = SEQUENCE { DigestAlgorithmIdentifier, Digest } */
+    /* DigestInfo = SEQUENCE { AlgorithmIdentifier { OID, NULL }, OCTET STRING(hash) }
+     * The outer DigestInfo SEQUENCE directly contains: OID, NULL, OCTET STRING. */
     {
-        DerBuf di, alg;
-        if (!db_init(&di) || !db_init(&alg)) {
-            db_free(&di); db_free(&alg); db_free(&body); db_free(&seq);
+        DerBuf di, alg, hash_os;
+        if (!db_init(&di) || !db_init(&alg) || !db_init(&hash_os)) {
+            db_free(&di); db_free(&alg); db_free(&hash_os);
+            db_free(&body); db_free(&seq);
             return NULL;
         }
-        db_der_oid_nid(&alg, NID_sha256);
-        db_der_null(&alg);
-        db_der_seq(&di, alg.data, alg.len);
-        db_raw(&body, di.data, di.len);
-        db_free(&di);
+        if (!db_der_oid_nid(&alg, NID_sha256) ||
+            !db_der_null(&alg) ||
+            !db_der_octet_string(&hash_os, pe_hash, pe_hash_len) ||
+            !db_raw(&di, alg.data, alg.len) ||
+            !db_raw(&di, hash_os.data, hash_os.len)) {
+            db_free(&di); db_free(&alg); db_free(&hash_os);
+            db_free(&body); db_free(&seq);
+            return NULL;
+        }
         db_free(&alg);
+        db_free(&hash_os);
+        if (!db_der_seq(&body, di.data, di.len)) {
+            db_free(&di); db_free(&body); db_free(&seq);
+            return NULL;
+        }
+        db_free(&di);
     }
 
-    /* messageDigest = OCTET STRING (PE hash) */
-    db_der_octet_string(&body, pe_hash, pe_hash_len);
-
     /* Wrap in SEQUENCE */
-    db_der_seq(&seq, body.data, body.len);
+    if (!db_der_seq(&seq, body.data, body.len)) {
+        db_free(&body); db_free(&seq);
+        return NULL;
+    }
     db_free(&body);
 
     *out_len = (int)seq.len;
@@ -349,6 +372,7 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
         obj = OBJ_txt2obj(SPC_PE_IMAGE_DATA_OID, 1);
         if (obj)
             PKCS7_add_signed_attribute(si, NID_pkcs9_contentType, V_ASN1_OBJECT, obj);
+        /* Note: PKCS7_add_signed_attribute takes ownership of obj (no free needed) */
 
         /* messageDigest = SHA256(SpcIndirectDataContent DER) */
         ASN1_OCTET_STRING *md = ASN1_OCTET_STRING_new();
@@ -400,7 +424,6 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
                     if (!si->auth_attr)
                         si->auth_attr = sk_X509_ATTRIBUTE_new_null();
                     sk_X509_ATTRIBUTE_push(si->auth_attr, ts_attr);
-                    fprintf(stderr, "[timestamp] signingTime attribute added (%d bytes DER)\n", td);
                 }
             }
         }
@@ -425,8 +448,12 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
         ERR_error_string_n(err, errbuf, sizeof(errbuf));
         fprintf(stderr, "PKCS7_final failed: %s\n", errbuf);
         BIO_free(content_bio);
-        OPENSSL_free(spc_der);
+        /* Detach content before freeing spc_der to avoid double-free:
+           PKCS7_final may have set contents->d.data to reference spc_der. */
+        if (p7->d.sign && p7->d.sign->contents)
+            p7->d.sign->contents->d.data = NULL;
         PKCS7_free(p7);
+        OPENSSL_free(spc_der);
         return NULL;
     }
     BIO_free(content_bio);
@@ -454,7 +481,6 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
     /* 8. Timestamp (RFC 3161 counter-signature via TSA server) */
     if (timestamp_url && timestamp_url[0]) {
         if (status_cb) status_cb("请求时间戳...", cb_data);
-        fprintf(stderr, "[timestamp] requesting timestamp from: %s\n", timestamp_url);
         PKCS7_SIGNER_INFO *ts_si = sk_PKCS7_SIGNER_INFO_value(
             PKCS7_get_signer_info(p7), 0);
         if (ts_si && ts_si->enc_digest && ts_si->enc_digest->length > 0) {
@@ -477,7 +503,6 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
                 if (timestamp_request(sig_hash, sig_hash_len,
                                       NID_sha256, timestamp_url,
                                       &ts_token, &ts_token_len)) {
-                    fprintf(stderr, "[timestamp] token obtained: %zu bytes\n", ts_token_len);
                     if (!timestamp_attach_to_signer(ts_si, ts_token, ts_token_len)) {
                         fprintf(stderr, "[timestamp] ERROR: failed to attach timestamp token\n");
                         free(ts_token);
@@ -506,15 +531,7 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
         }
     }
 
-    /* 9. Encode to DER — verify unauth_attr is present */
-    {
-        PKCS7_SIGNER_INFO *chk_si = sk_PKCS7_SIGNER_INFO_value(
-            PKCS7_get_signer_info(p7), 0);
-        fprintf(stderr, "[debug] before encode: unauth_attr count = %d\n",
-                chk_si && chk_si->unauth_attr ?
-                sk_X509_ATTRIBUTE_num(chk_si->unauth_attr) : -1);
-    }
-
+    /* 9. Encode to DER */
     out_bio = BIO_new(BIO_s_mem());
     if (!out_bio) {
         PKCS7_free(p7);
@@ -528,44 +545,6 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
         BIO_free(out_bio);
         PKCS7_free(p7);
         return NULL;
-    }
-
-    /* Post-encode verification: parse DER back and check timestamp */
-    {
-        BIO_get_mem_ptr(out_bio, &bmem);
-        fprintf(stderr, "[debug] encoded DER: %zu bytes, first 16:", bmem->length);
-        for (size_t i = 0; i < bmem->length && i < 16; i++)
-            fprintf(stderr, " %02x", (unsigned char)bmem->data[i]);
-        fprintf(stderr, "\n");
-
-        /* Parse back and check unauth_attr */
-        BIO *tmpbio = BIO_new_mem_buf(bmem->data, (int)bmem->length);
-        if (tmpbio) {
-            PKCS7 *p7check = d2i_PKCS7_bio(tmpbio, NULL);
-            if (p7check) {
-                PKCS7_SIGNER_INFO *si2 = sk_PKCS7_SIGNER_INFO_value(
-                    PKCS7_get_signer_info(p7check), 0);
-                if (si2) {
-                    fprintf(stderr, "[debug] after encode parse: unauth_attr count = %d\n",
-                            si2->unauth_attr ?
-                            sk_X509_ATTRIBUTE_num(si2->unauth_attr) : 0);
-                    if (si2->unauth_attr) {
-                        for (int ai = 0; ai < sk_X509_ATTRIBUTE_num(si2->unauth_attr); ai++) {
-                            X509_ATTRIBUTE *a = sk_X509_ATTRIBUTE_value(si2->unauth_attr, ai);
-                            if (a) {
-                                ASN1_OBJECT *ao = X509_ATTRIBUTE_get0_object(a);
-                                char oid_buf[128];
-                                OBJ_obj2txt(oid_buf, sizeof(oid_buf), ao, 1);
-                                fprintf(stderr, "[debug] unauth_attr[%d]: OID=%s, count=%d\n",
-                                        ai, oid_buf, X509_ATTRIBUTE_count(a));
-                            }
-                        }
-                    }
-                }
-                PKCS7_free(p7check);
-            }
-            BIO_free(tmpbio);
-        }
     }
 
     BIO_get_mem_ptr(out_bio, &bmem);
@@ -824,7 +803,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
                     }
                     if (found) break;
                 }
-                OPENSSL_free(signers);
+                sk_X509_free(signers);
             }
         }
         X509_free(ca_cert);
@@ -835,7 +814,20 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         printf("CA certificate chain verified\n");
     }
 
-    /* Check messageDigest if authenticated attributes are present */
+    /* Verify messageDigest and PE hash if authenticated attributes are present.
+     *
+     * Authenticode structure:
+     *   PKCS#7 content = DER(SpcIndirectDataContent) which contains:
+     *     SpcAttributeTypeAndOptionalValue { OID(SPC_PE_IMAGE_DATA) }
+     *     DigestInfo { AlgorithmIdentifier { OID, NULL }, OCTET STRING(PE hash) }
+     *
+     *   Authenticated attribute messageDigest = SHA256(DER(SpcIndirectDataContent))
+     *
+     * So we must:
+     *   1. Verify messageDigest == SHA256(PKCS#7 content bytes)
+     *   2. Extract the PE hash from inside the SpcIndirectDataContent
+     *   3. Compare extracted PE hash with hash computed from the actual PE file
+     */
     {
         PKCS7_SIGNER_INFO *si = sk_PKCS7_SIGNER_INFO_value(
             PKCS7_get_signer_info(p7), 0);
@@ -844,15 +836,121 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
             ASN1_TYPE *md_val = (md_nid != NID_undef)
                 ? PKCS7_get_signed_attribute(si, md_nid) : NULL;
             if (md_val && md_val->type == V_ASN1_OCTET_STRING) {
-                /* messageDigest present — verify PE hash */
-                unsigned char pe_hash[EVP_MAX_MD_SIZE];
-                unsigned int pe_hash_len = 0;
-                if (pe_compute_hash(pe, EVP_sha256(), pe_hash, &pe_hash_len)) {
-                    ASN1_OCTET_STRING *os = md_val->value.octet_string;
-                    if (os->length != (int)pe_hash_len ||
-                        memcmp(os->data, pe_hash, pe_hash_len) != 0) {
-                        fprintf(stderr, "PE hash mismatch — file has been modified!\n");
-                        goto cleanup;
+                ASN1_OCTET_STRING *md_attr = md_val->value.octet_string;
+
+                /* Step 1: Verify messageDigest = SHA256(PKCS#7 content) */
+                if (p7->d.sign && p7->d.sign->contents
+                    && p7->d.sign->contents->d.data) {
+                    ASN1_OCTET_STRING *content_os =
+                        (ASN1_OCTET_STRING *)p7->d.sign->contents->d.data;
+                    if (content_os->data && content_os->length > 0) {
+                        unsigned char content_hash[EVP_MAX_MD_SIZE];
+                        unsigned int content_hash_len = 0;
+                        EVP_MD_CTX *vctx = EVP_MD_CTX_new();
+                        if (vctx) {
+                            EVP_DigestInit_ex(vctx, EVP_sha256(), NULL);
+                            EVP_DigestUpdate(vctx, content_os->data,
+                                             content_os->length);
+                            EVP_DigestFinal_ex(vctx, content_hash,
+                                               &content_hash_len);
+                            EVP_MD_CTX_free(vctx);
+                        }
+                        if (content_hash_len == 0 ||
+                            md_attr->length != (int)content_hash_len ||
+                            memcmp(md_attr->data, content_hash,
+                                   content_hash_len) != 0) {
+                            fprintf(stderr, "messageDigest verification FAILED\n");
+                            goto cleanup;
+                        }
+
+                        /* Step 2: Extract PE hash from SpcIndirectDataContent DER.
+                         * Structure: SEQUENCE { SEQUENCE{OID}, DigestInfo }
+                         * DigestInfo: SEQUENCE { OID, NULL, OCTET STRING(pe_hash) } */
+                        {
+                            const unsigned char *p = content_os->data;
+                            const unsigned char *end = p + content_os->length;
+                            unsigned char *stored_pe_hash = NULL;
+                            long stored_pe_hash_len = 0;
+
+                            /* Outer SEQUENCE */
+                            if (p < end && *p == 0x30) {
+                                p++;
+                                if (p < end && *p < 0x80) p += 1;
+                                else if (p < end && *p == 0x81) p += 2;
+                                else if (p < end && *p == 0x82) p += 3;
+                                else p = end;
+
+                                /* Skip first inner SEQUENCE (SpcAttributeTypeAndOptionalValue) */
+                                if (p < end && *p == 0x30) {
+                                    p++;
+                                    long inner = 0;
+                                    if (p < end && *p < 0x80) { inner = *p++; }
+                                    else if (p < end && *p == 0x81 && p+1 < end) { inner = p[1]; p += 2; }
+                                    else if (p < end && *p == 0x82 && p+2 < end) { inner = (p[1]<<8)|p[2]; p += 3; }
+                                    else p = end;
+                                    if (p + inner <= end) p += inner;
+                                }
+
+                                /* Second inner SEQUENCE = DigestInfo */
+                                if (p < end && *p == 0x30) {
+                                    p++;
+                                    long inner = 0;
+                                    if (p < end && *p < 0x80) { inner = *p++; }
+                                    else if (p < end && *p == 0x81 && p+1 < end) { inner = p[1]; p += 2; }
+                                    else if (p < end && *p == 0x82 && p+2 < end) { inner = (p[1]<<8)|p[2]; p += 3; }
+                                    else p = end;
+                                    const unsigned char *di_end = p + inner;
+                                    if (di_end > end) di_end = end;
+
+                                    /* Skip AlgorithmIdentifier: OID + NULL */
+                                    if (p + 2 <= di_end && *p == 0x06) {
+                                        p++;
+                                        long oid_len = 0;
+                                        if (p < di_end && *p < 0x80) { oid_len = *p++; }
+                                        else if (p+1 < di_end && *p == 0x81) { oid_len = p[1]; p += 2; }
+                                        else p = di_end;
+                                        if (p + oid_len <= di_end) p += oid_len;
+                                        if (p + 2 <= di_end && *p == 0x05 && p[1] == 0x00)
+                                            p += 2;
+                                    }
+
+                                    /* Read OCTET STRING containing PE hash */
+                                    if (p + 2 <= di_end && *p == 0x04) {
+                                        p++;
+                                        if (p < di_end && *p < 0x80) {
+                                            stored_pe_hash_len = *p++;
+                                            stored_pe_hash = (unsigned char *)p;
+                                        } else if (p+1 < di_end && *p == 0x81) {
+                                            stored_pe_hash_len = p[1]; p += 2;
+                                            stored_pe_hash = (unsigned char *)p;
+                                        }
+                                    }
+                                }
+                            }
+
+                            /* Step 3: Compare stored PE hash with computed PE hash */
+                            if (!stored_pe_hash || stored_pe_hash_len <= 0) {
+                                fprintf(stderr, "Could not extract PE hash from signature\n");
+                                goto cleanup;
+                            }
+
+                            {
+                                unsigned char pe_hash[EVP_MAX_MD_SIZE];
+                                unsigned int pe_hash_len = 0;
+                                if (!pe_compute_hash(pe, EVP_sha256(),
+                                                     pe_hash, &pe_hash_len)) {
+                                    fprintf(stderr, "Failed to compute PE hash\n");
+                                    goto cleanup;
+                                }
+                                if ((int)pe_hash_len != stored_pe_hash_len ||
+                                    memcmp(pe_hash, stored_pe_hash,
+                                           pe_hash_len) != 0) {
+                                    fprintf(stderr, "PE hash mismatch — "
+                                            "file has been modified!\n");
+                                    goto cleanup;
+                                }
+                            }
+                        }
                     }
                 }
             }

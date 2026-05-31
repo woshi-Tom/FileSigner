@@ -169,6 +169,20 @@ static const COLORREF g_log_colors[] = {
 /*  Helpers                                                       */
 /* ══════════════════════════════════════════════════════════════ */
 
+/* Semantic version comparison: returns >0 if a > b, <0 if a < b, 0 if equal */
+static int version_cmp(const wchar_t *a, const wchar_t *b)
+{
+    while (*a || *b) {
+        unsigned long na = 0, nb = 0;
+        while (*a >= L'0' && *a <= L'9') { na = na * 10 + (*a - L'0'); a++; }
+        while (*b >= L'0' && *b <= L'9') { nb = nb * 10 + (*b - L'0'); b++; }
+        if (na != nb) return (na > nb) ? 1 : -1;
+        if (*a == L'.') a++;
+        if (*b == L'.') b++;
+    }
+    return 0;
+}
+
 static void
 wide_from_utf8(const char *src, wchar_t *dst, int dst_chars)
 {
@@ -180,6 +194,7 @@ wide_from_utf8(const char *src, wchar_t *dst, int dst_chars)
 static void
 wide_to_utf8(const wchar_t *src, char *dst, int dst_chars)
 {
+    if (!dst) return;
     if (!src || !src[0]) { dst[0] = '\0'; return; }
     WideCharToMultiByte(CP_UTF8, 0, src, -1, dst, dst_chars, NULL, NULL);
 }
@@ -875,7 +890,7 @@ sign_thread_proc(LPVOID param)
                            thread_progress_cb, task);
 
     post_log_utf8(LOG_COLOR_INFO, "完成 - 已签名 %d 个文件", count);
-    PostMessageW(hwnd, WM_APP_SIGN_DONE, (WPARAM)count, 0);
+    PostMessageW(hwnd, WM_APP_SIGN_DONE, (WPARAM)count, (LPARAM)task);
     return 0;
 }
 
@@ -945,7 +960,7 @@ tsa_test_thread(LPVOID param)
 /*  About dialog & Update check                                   */
 /* ══════════════════════════════════════════════════════════════ */
 
-#define FILESIGNER_VERSION L"4.0.0"
+#define FILESIGNER_VERSION L"4.0.1"
 #define UPDATE_CHECK_URL   L"https://api.github.com/repos/woshi-Tom/FileSigner/releases/latest"
 
 static HANDLE g_hUpdateThread = NULL;
@@ -1034,7 +1049,7 @@ update_check_thread(LPVOID param)
                         /* Compare versions (simple string compare, strip 'v' prefix) */
                         wchar_t *v = latest_ver;
                         if (*v == L'v' || *v == L'V') v++;
-                        if (wcscmp(v, FILESIGNER_VERSION) > 0)
+                        if (version_cmp(v, FILESIGNER_VERSION) > 0)
                             has_update = 1;
                     }
                 }
@@ -1122,12 +1137,14 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_APP_SIGN_DONE: {
+        SignTask *task = (SignTask *)lParam;
         if (g_hThread) {
             WaitForSingleObject(g_hThread, INFINITE);
             CloseHandle(g_hThread);
             g_hThread = NULL;
         }
         EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), TRUE);
+        free(task);
         return 0;
     }
     case WM_APP_CERT_DONE: {
@@ -1734,7 +1751,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             wide_to_utf8(wemail, task->email, 256);
             task->days = days;
 
-            CreateDirectoryA(task->dir, NULL);
+            CreateDirectoryW(task->wdir, NULL);
 
             EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), FALSE);
             SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
@@ -1847,6 +1864,7 @@ gui_main(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     if (g_hFont)       DeleteObject(g_hFont);
     if (g_hFontBold)   DeleteObject(g_hFontBold);
+    if (g_hFontTab)    DeleteObject(g_hFontTab);
     if (g_hMonoFont)   DeleteObject(g_hMonoFont);
     if (g_hbrBg)       DeleteObject(g_hbrBg);
     if (g_hbrPanel)    DeleteObject(g_hbrPanel);
