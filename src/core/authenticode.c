@@ -51,7 +51,10 @@ static int db_grow(DerBuf *db, size_t need)
 {
     if (!db->data) return 0;
     if (db->len + need <= db->cap) return 1;
-    while (db->len + need > db->cap) db->cap *= 2;
+    while (db->len + need > db->cap) {
+        if (db->cap > (size_t)-1 / 2) return 0; /* overflow */
+        db->cap *= 2;
+    }
     unsigned char *p = (unsigned char *)OPENSSL_realloc(db->data, db->cap);
     if (!p) return 0;
     db->data = p;
@@ -259,7 +262,7 @@ static unsigned char* build_spc_content_der(const unsigned char *pe_hash,
                                              unsigned int pe_hash_len,
                                              int *out_len)
 {
-    DerBuf body, seq;
+    DerBuf body = {0}, seq = {0};
     unsigned char *result = NULL;
 
     if (!db_init(&body) || !db_init(&seq)) {
@@ -281,7 +284,7 @@ static unsigned char* build_spc_content_der(const unsigned char *pe_hash,
     /* DigestInfo = SEQUENCE { AlgorithmIdentifier { OID, NULL }, OCTET STRING(hash) }
      * The outer DigestInfo SEQUENCE directly contains: OID, NULL, OCTET STRING. */
     {
-        DerBuf di, alg, hash_os;
+        DerBuf di = {0}, alg = {0}, hash_os = {0};
         if (!db_init(&di) || !db_init(&alg) || !db_init(&hash_os)) {
             db_free(&di); db_free(&alg); db_free(&hash_os);
             db_free(&body); db_free(&seq);
@@ -359,9 +362,14 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
     unsigned int md_len = 0;
     EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
     if (!mdctx) { OPENSSL_free(spc_der); PKCS7_free(p7); return NULL; }
-    EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(mdctx, spc_der, spc_len);
-    EVP_DigestFinal_ex(mdctx, md_value, &md_len);
+    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1 ||
+        EVP_DigestUpdate(mdctx, spc_der, spc_len) != 1 ||
+        EVP_DigestFinal_ex(mdctx, md_value, &md_len) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        OPENSSL_free(spc_der);
+        PKCS7_free(p7);
+        return NULL;
+    }
     EVP_MD_CTX_free(mdctx);
 
     /* 5. Add authenticated attributes for Authenticode */
@@ -370,16 +378,19 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
 
         /* contentType = SPC_PE_IMAGE_DATA */
         obj = OBJ_txt2obj(SPC_PE_IMAGE_DATA_OID, 1);
-        if (obj)
-            PKCS7_add_signed_attribute(si, NID_pkcs9_contentType, V_ASN1_OBJECT, obj);
-        /* Note: PKCS7_add_signed_attribute takes ownership of obj (no free needed) */
+        if (obj) {
+            if (!PKCS7_add_signed_attribute(si, NID_pkcs9_contentType,
+                                             V_ASN1_OBJECT, obj))
+                ASN1_OBJECT_free(obj);
+        }
 
         /* messageDigest = SHA256(SpcIndirectDataContent DER) */
         ASN1_OCTET_STRING *md = ASN1_OCTET_STRING_new();
         if (md) {
             ASN1_OCTET_STRING_set(md, md_value, md_len);
-            PKCS7_add_signed_attribute(si, NID_pkcs9_messageDigest,
-                                       V_ASN1_OCTET_STRING, md);
+            if (!PKCS7_add_signed_attribute(si, NID_pkcs9_messageDigest,
+                                             V_ASN1_OCTET_STRING, md))
+                ASN1_OCTET_STRING_free(md);
         }
 
         /* signingTime = current system time (local timestamp)
@@ -423,7 +434,11 @@ static unsigned char* build_authenticode_pkcs7(EVP_PKEY *pkey, X509 *cert,
                     /* Add to authenticated attributes */
                     if (!si->auth_attr)
                         si->auth_attr = sk_X509_ATTRIBUTE_new_null();
-                    sk_X509_ATTRIBUTE_push(si->auth_attr, ts_attr);
+                    if (si->auth_attr) {
+                        sk_X509_ATTRIBUTE_push(si->auth_attr, ts_attr);
+                    } else {
+                        X509_ATTRIBUTE_free(ts_attr);
+                    }
                 }
             }
         }
@@ -620,7 +635,8 @@ int authenticode_sign(const char *pe_path,
 
     /* If re-signing: strip old signature before hashing.
      * Clear old cert data and cert_dir so hash is computed on a clean file. */
-    if (pe->cert_offset && pe->cert_size) {
+    if (pe->cert_offset && pe->cert_size &&
+        pe->cert_offset + pe->cert_size <= pe->size) {
         if (status_cb) status_cb("剥离旧签名...", cb_data);
         memset(pe->data + pe->cert_offset, 0, pe->cert_size);
         pe->size = pe->cert_offset;  /* Trim file to exclude old cert */
@@ -876,8 +892,8 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
                             if (p < end && *p == 0x30) {
                                 p++;
                                 if (p < end && *p < 0x80) p += 1;
-                                else if (p < end && *p == 0x81) p += 2;
-                                else if (p < end && *p == 0x82) p += 3;
+                                else if (p + 1 < end && *p == 0x81) p += 2;
+                                else if (p + 2 < end && *p == 0x82) p += 3;
                                 else p = end;
 
                                 /* Skip first inner SEQUENCE (SpcAttributeTypeAndOptionalValue) */
@@ -919,10 +935,12 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
                                         p++;
                                         if (p < di_end && *p < 0x80) {
                                             stored_pe_hash_len = *p++;
-                                            stored_pe_hash = (unsigned char *)p;
+                                            if (p + stored_pe_hash_len <= di_end)
+                                                stored_pe_hash = (unsigned char *)p;
                                         } else if (p+1 < di_end && *p == 0x81) {
                                             stored_pe_hash_len = p[1]; p += 2;
-                                            stored_pe_hash = (unsigned char *)p;
+                                            if (p + stored_pe_hash_len <= di_end)
+                                                stored_pe_hash = (unsigned char *)p;
                                         }
                                     }
                                 }
