@@ -9,6 +9,9 @@
 #define CERT_CA_CN      "FileSigner Root CA"
 #define CERT_SIGNER_CN  "FileSigner Code Signing"
 
+/* Status callback for progress reporting */
+typedef void (*cert_status_cb)(const char *status, void *user_data);
+
 /*
  * Generate a self-signed Root CA + code signing certificate + PFX.
  *
@@ -34,5 +37,17 @@ int cert_generate(const char *output_dir,
                   int validity_days,
                   const char *signer_cn,
                   const char *signer_email);
+
+/*
+ * Same as cert_generate but with status callback for progress reporting.
+ */
+int cert_generate_ex(const char *output_dir,
+                     const char *ca_password,
+                     const char *signer_password,
+                     int validity_days,
+                     const char *signer_cn,
+                     const char *signer_email,
+                     cert_status_cb status_cb,
+                     void *cb_data);
 
 #endif /* CERT_GEN_H */

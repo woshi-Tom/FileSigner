@@ -12,7 +12,7 @@ static void print_usage(const char *prog)
 {
     printf("FileSigner v%s - Authenticode PE 签名工具\n\n", VERSION);
     printf("用法:\n");
-    printf("  %s sign <文件|目录> --pfx <pfx> [选项]\n", prog);
+    printf("  %s sign <PE文件|目录> --pfx <pfx> [选项]\n", prog);
     printf("  %s gen-cert [选项]\n", prog);
     printf("  %s verify <文件> [--ca <证书>]\n\n", prog);
     printf("证书生成:\n");
@@ -23,6 +23,7 @@ static void print_usage(const char *prog)
     printf("  --signer-cn <名称>        签名者姓名 (CN, 默认: FileSigner Code Signing)\n");
     printf("  --signer-email <邮箱>      签名者邮箱 (SAN 扩展, 可选)\n\n");
     printf("签名:\n");
+    printf("  (支持 PE 文件: .exe .dll .sys .ocx .scr .cpl .ax .efi 等)\n");
     printf("  --pfx <文件>               PFX/P12 证书文件\n");
     printf("  --password <密码>          PFX 密码\n");
     printf("  --timestamp <URL>          时间戳服务器 URL\n");
@@ -150,8 +151,12 @@ int cli_main(int argc, char *argv[])
             }
             int count = batch_sign(target, pfx_path, pfx_pw, ts_url,
                                     output_dir, force, recursive, NULL, NULL);
-            printf("\n已签名 %d 个文件\n", count);
-            ret = (count > 0) ? 0 : 1;
+            if (count < 0) {
+                ret = 1;
+            } else {
+                printf("\n已签名 %d 个文件\n", count);
+                ret = 0;
+            }
         } else if (file_exists(target)) {
             const char *out = target;
             char outbuf[4096];

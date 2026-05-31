@@ -700,7 +700,8 @@ cleanup:
     return ret;
 }
 
-int authenticode_verify(const char *pe_path, const char *ca_path)
+int authenticode_verify_ex(const char *pe_path, const char *ca_path,
+                           authenticode_status_cb status_cb, void *cb_data)
 {
     PE_FILE *pe = NULL;
     unsigned char *sig_der = NULL;
@@ -710,31 +711,38 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
     int ret = 0;
 
     /* Load PE */
+    if (status_cb) status_cb("加载 PE 文件...", cb_data);
     pe = pe_load(pe_path);
     if (!pe) {
         fprintf(stderr, "Failed to load PE file: %s\n", pe_path);
+        if (status_cb) status_cb("加载 PE 文件失败", cb_data);
         return 0;
     }
 
     /* Extract signature */
+    if (status_cb) status_cb("提取签名...", cb_data);
     sig_der = pe_extract_signature(pe, &sig_len);
     if (!sig_der) {
         fprintf(stderr, "No signature found\n");
+        if (status_cb) status_cb("未找到签名", cb_data);
         goto cleanup;
     }
 
     /* Parse PKCS#7 */
+    if (status_cb) status_cb("解析 PKCS#7 结构...", cb_data);
     bio = BIO_new_mem_buf(sig_der, (int)sig_len);
     if (!bio) goto cleanup;
     p7 = d2i_PKCS7_bio(bio, NULL);
     if (!p7) {
         fprintf(stderr, "Failed to parse PKCS#7 signature\n");
+        if (status_cb) status_cb("PKCS#7 解析失败", cb_data);
         goto cleanup;
     }
 
     /* Verify it's a SignedData */
     if (OBJ_obj2nid(p7->type) != NID_pkcs7_signed || !p7->d.sign) {
         fprintf(stderr, "Not a PKCS#7 SignedData\n");
+        if (status_cb) status_cb("不是有效的 PKCS#7 SignedData", cb_data);
         goto cleanup;
     }
 
@@ -742,6 +750,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
      * Authenticode uses SPC_PE_IMAGE_DATA as content-type OID, which
      * PKCS7_verify doesn't understand. We temporarily override it to
      * NID_pkcs7_data so OpenSSL can verify the signature, then restore. */
+    if (status_cb) status_cb("验证加密签名...", cb_data);
     {
         int sig_ok = 0;
         if (p7->d.sign->contents && p7->d.sign->contents->d.data &&
@@ -775,6 +784,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         if (!sig_ok) {
             fprintf(stderr, "Cryptographic signature verification FAILED — "
                             "file may have been tampered with\n");
+            if (status_cb) status_cb("加密签名验证失败", cb_data);
             goto cleanup;
         }
         fprintf(stderr, "[verify] Cryptographic signature OK\n");
@@ -786,8 +796,10 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         X509 *ca_cert;
         int found = 0;
 
+        if (status_cb) status_cb("验证证书链...", cb_data);
         if (!fp) {
             fprintf(stderr, "Cannot open CA certificate: %s\n", ca_path);
+            if (status_cb) status_cb("无法打开 CA 证书", cb_data);
             goto cleanup;
         }
         ca_cert = d2i_X509_fp(fp, NULL);
@@ -795,6 +807,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         fclose(fp);
         if (!ca_cert) {
             fprintf(stderr, "Failed to parse CA certificate: %s\n", ca_path);
+            if (status_cb) status_cb("CA 证书解析失败", cb_data);
             goto cleanup;
         }
 
@@ -825,6 +838,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
         X509_free(ca_cert);
         if (!found) {
             fprintf(stderr, "CA certificate did not issue/sign the signer certificate\n");
+            if (status_cb) status_cb("证书链验证失败", cb_data);
             goto cleanup;
         }
         printf("CA certificate chain verified\n");
@@ -844,6 +858,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
      *   2. Extract the PE hash from inside the SpcIndirectDataContent
      *   3. Compare extracted PE hash with hash computed from the actual PE file
      */
+    if (status_cb) status_cb("验证文件哈希...", cb_data);
     {
         PKCS7_SIGNER_INFO *si = sk_PKCS7_SIGNER_INFO_value(
             PKCS7_get_signer_info(p7), 0);
@@ -876,6 +891,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
                             memcmp(md_attr->data, content_hash,
                                    content_hash_len) != 0) {
                             fprintf(stderr, "messageDigest verification FAILED\n");
+                            if (status_cb) status_cb("messageDigest 验证失败", cb_data);
                             goto cleanup;
                         }
 
@@ -949,6 +965,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
                             /* Step 3: Compare stored PE hash with computed PE hash */
                             if (!stored_pe_hash || stored_pe_hash_len <= 0) {
                                 fprintf(stderr, "Could not extract PE hash from signature\n");
+                                if (status_cb) status_cb("无法提取签名中的 PE 哈希", cb_data);
                                 goto cleanup;
                             }
 
@@ -958,6 +975,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
                                 if (!pe_compute_hash(pe, EVP_sha256(),
                                                      pe_hash, &pe_hash_len)) {
                                     fprintf(stderr, "Failed to compute PE hash\n");
+                                    if (status_cb) status_cb("计算 PE 哈希失败", cb_data);
                                     goto cleanup;
                                 }
                                 if ((int)pe_hash_len != stored_pe_hash_len ||
@@ -965,6 +983,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
                                            pe_hash_len) != 0) {
                                     fprintf(stderr, "PE hash mismatch — "
                                             "file has been modified!\n");
+                                    if (status_cb) status_cb("文件哈希不匹配", cb_data);
                                     goto cleanup;
                                 }
                             }
@@ -976,6 +995,7 @@ int authenticode_verify(const char *pe_path, const char *ca_path)
     }
 
     printf("Signature verification passed: %s\n", pe_path);
+    if (status_cb) status_cb("验证完成: 签名有效", cb_data);
     ret = 1;
 
 cleanup:
@@ -985,6 +1005,11 @@ cleanup:
     if (pe) pe_free(pe);
 
     return ret;
+}
+
+int authenticode_verify(const char *pe_path, const char *ca_path)
+{
+    return authenticode_verify_ex(pe_path, ca_path, NULL, NULL);
 }
 
 int authenticode_is_signed(const char *pe_path)

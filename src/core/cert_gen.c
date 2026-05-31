@@ -212,12 +212,14 @@ static X509* create_signer_cert(EVP_PKEY *signer_key, X509 *ca_cert,
 
 /* ------------------------------------------------------------------ */
 
-int cert_generate(const char *output_dir,
-                  const char *ca_password,
-                  const char *signer_password,
-                  int validity_days,
-                  const char *signer_cn,
-                  const char *signer_email)
+int cert_generate_ex(const char *output_dir,
+                     const char *ca_password,
+                     const char *signer_password,
+                     int validity_days,
+                     const char *signer_cn,
+                     const char *signer_email,
+                     cert_status_cb status_cb,
+                     void *cb_data)
 {
     EVP_PKEY *ca_key = NULL, *signer_key = NULL;
     X509 *ca_cert = NULL, *signer_cert = NULL;
@@ -225,71 +227,99 @@ int cert_generate(const char *output_dir,
     char path[1024];
 
     /* Generate CA key pair (4096-bit RSA) */
+    if (status_cb) status_cb("生成 CA 密钥对 (4096-bit RSA)...", cb_data);
     ca_key = generate_rsa_key(4096);
     if (!ca_key) {
         fprintf(stderr, "Failed to generate CA key pair\n");
+        if (status_cb) status_cb("CA 密钥对生成失败", cb_data);
         goto cleanup;
     }
 
     /* Generate signer key pair (2048-bit RSA) */
+    if (status_cb) status_cb("生成签名者密钥对 (2048-bit RSA)...", cb_data);
     signer_key = generate_rsa_key(2048);
     if (!signer_key) {
         fprintf(stderr, "Failed to generate signer key pair\n");
+        if (status_cb) status_cb("签名者密钥对生成失败", cb_data);
         goto cleanup;
     }
 
     /* Create CA certificate */
+    if (status_cb) status_cb("创建自签名 Root CA 证书...", cb_data);
     ca_cert = create_ca_cert(ca_key);
     if (!ca_cert) {
         fprintf(stderr, "Failed to create CA certificate\n");
+        if (status_cb) status_cb("CA 证书创建失败", cb_data);
         goto cleanup;
     }
 
     /* Create signer certificate */
+    {
+        int days = validity_days > 0 ? validity_days : CERT_SIGNER_DEFAULT_DAYS;
+        char msg[256];
+        const char *cn = (signer_cn && signer_cn[0]) ? signer_cn : CERT_SIGNER_CN;
+        snprintf(msg, sizeof(msg), "创建代码签名证书 (CN: %s, 有效期: %d 天)...", cn, days);
+        if (status_cb) status_cb(msg, cb_data);
+    }
     signer_cert = create_signer_cert(signer_key, ca_cert, ca_key, validity_days,
                                       signer_cn, signer_email);
     if (!signer_cert) {
         fprintf(stderr, "Failed to create signer certificate\n");
+        if (status_cb) status_cb("签名者证书创建失败", cb_data);
         goto cleanup;
     }
 
     /* Write files */
     snprintf(path, sizeof(path), "%s/FileSigner_RootCA.cer", output_dir);
     if (!write_cert_pem(path, ca_cert)) {
-        fprintf(stderr, "Failed to write CA certificate\n"); goto cleanup;
+        fprintf(stderr, "Failed to write CA certificate\n");
+        if (status_cb) status_cb("导出 CA 证书失败", cb_data);
+        goto cleanup;
     }
+    if (status_cb) { char msg[1100]; snprintf(msg, sizeof(msg), "导出 %s", path); status_cb(msg, cb_data); }
     printf("  Created: %s\n", path);
 
     snprintf(path, sizeof(path), "%s/FileSigner_RootCA.key", output_dir);
     if (!write_key_pem(path, ca_key, ca_password)) {
-        fprintf(stderr, "Failed to write CA key\n"); goto cleanup;
+        fprintf(stderr, "Failed to write CA key\n");
+        if (status_cb) status_cb("导出 CA 密钥失败", cb_data);
+        goto cleanup;
     }
+    if (status_cb) { char msg[1100]; snprintf(msg, sizeof(msg), "导出 %s", path); status_cb(msg, cb_data); }
     printf("  Created: %s\n", path);
 
     snprintf(path, sizeof(path), "%s/FileSigner_Signer.cer", output_dir);
     if (!write_cert_pem(path, signer_cert)) {
-        fprintf(stderr, "Failed to write signer certificate\n"); goto cleanup;
+        fprintf(stderr, "Failed to write signer certificate\n");
+        if (status_cb) status_cb("导出签名者证书失败", cb_data);
+        goto cleanup;
     }
+    if (status_cb) { char msg[1100]; snprintf(msg, sizeof(msg), "导出 %s", path); status_cb(msg, cb_data); }
     printf("  Created: %s\n", path);
 
     snprintf(path, sizeof(path), "%s/FileSigner_Signer.key", output_dir);
     if (!write_key_pem(path, signer_key, NULL)) {
-        fprintf(stderr, "Failed to write signer key\n"); goto cleanup;
+        fprintf(stderr, "Failed to write signer key\n");
+        if (status_cb) status_cb("导出签名者密钥失败", cb_data);
+        goto cleanup;
     }
+    if (status_cb) { char msg[1100]; snprintf(msg, sizeof(msg), "导出 %s", path); status_cb(msg, cb_data); }
     printf("  Created: %s\n", path);
 
     snprintf(path, sizeof(path), "%s/FileSigner_Signer.pfx", output_dir);
     {
         const char *friendly = (signer_cn && signer_cn[0]) ? signer_cn : CERT_SIGNER_CN;
+        if (status_cb) status_cb("打包 PFX (含证书链)...", cb_data);
         PKCS12 *p12_tmp = NULL;
-        /* write_pfx uses CERT_SIGNER_CN as friendly name; override via re-implementation */
         STACK_OF(X509) *extra = sk_X509_new_null();
         if (extra) sk_X509_push(extra, ca_cert);
         p12_tmp = PKCS12_create((char *)signer_password, friendly,
                                 signer_key, signer_cert, extra, 0, 0, 0, 0, 0);
         if (extra) sk_X509_free(extra);
         if (!p12_tmp) {
-            fprintf(stderr, "Failed to write PFX file\n"); goto cleanup;
+            fprintf(stderr, "Failed to write PFX file\n");
+            if (status_cb) status_cb("PFX 创建失败", cb_data);
+            goto cleanup;
         }
         FILE *pfx_fp = fopen_utf8(path, "wb");
         if (!pfx_fp) { PKCS12_free(p12_tmp); goto cleanup; }
@@ -297,13 +327,16 @@ int cert_generate(const char *output_dir,
             fclose(pfx_fp);
             PKCS12_free(p12_tmp);
             fprintf(stderr, "Failed to write PFX file\n");
+            if (status_cb) status_cb("PFX 写入失败", cb_data);
             goto cleanup;
         }
         fclose(pfx_fp);
         PKCS12_free(p12_tmp);
     }
+    if (status_cb) { char msg[1100]; snprintf(msg, sizeof(msg), "导出 %s", path); status_cb(msg, cb_data); }
     printf("  Created: %s\n", path);
 
+    if (status_cb) status_cb("证书生成完成", cb_data);
     ret = 1;
 
 cleanup:
@@ -313,4 +346,15 @@ cleanup:
     if (signer_cert) X509_free(signer_cert);
 
     return ret;
+}
+
+int cert_generate(const char *output_dir,
+                  const char *ca_password,
+                  const char *signer_password,
+                  int validity_days,
+                  const char *signer_cn,
+                  const char *signer_email)
+{
+    return cert_generate_ex(output_dir, ca_password, signer_password,
+                            validity_days, signer_cn, signer_email, NULL, NULL);
 }

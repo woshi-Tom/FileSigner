@@ -14,6 +14,7 @@
 #include <stdarg.h>
 #include <uxtheme.h>
 #include <winhttp.h>
+#include <windowsx.h>
 
 #include "authenticode.h"
 #include "batch_signer.h"
@@ -29,6 +30,7 @@
 
 #define IDC_TAB_SIGN_BTN    101
 #define IDC_TAB_CERT_BTN    102
+#define IDC_TAB_VERIFY_BTN  103
 
 #define IDC_EDIT_TARGET     201
 #define IDC_BTN_BROWSE_TGT  202
@@ -59,8 +61,21 @@
 #define IDC_LBL_CERT_TITLE  309
 #define IDC_SEP_CERT        310
 
+#define IDC_EDIT_VERIFY_PE   501
+#define IDC_BTN_BROWSE_VPE   502
+#define IDC_EDIT_VERIFY_CA   503
+#define IDC_BTN_BROWSE_VCA   504
+#define IDC_BTN_VERIFY       505
+#define IDC_LBL_VERIFY_STATUS 506
+#define IDC_SEP_VERIFY       507
+#define IDC_CHK_VERIFY_RECURSIVE 508
+
 #define IDC_BTN_ABOUT       401
 #define IDC_BTN_UPDATE      402
+#define IDC_BTN_EXPORT_LOG  403
+
+#define IDM_COPY_SELECTED   5001
+#define IDM_SELECT_ALL      5002
 
 #define WM_APP_LOG          (WM_APP + 1)
 #define WM_APP_PROGRESS     (WM_APP + 2)
@@ -68,6 +83,7 @@
 #define WM_APP_CERT_DONE    (WM_APP + 4)
 #define WM_APP_TSA_DONE     (WM_APP + 5)
 #define WM_APP_UPDATE_DONE  (WM_APP + 6)
+#define WM_APP_VERIFY_DONE  (WM_APP + 7)
 
 #define GUI_PATH_LEN    4096
 
@@ -80,6 +96,7 @@
 #define W_CLIENT        800
 #define W_EDIT           624
 #define W_BROWSE         86
+#define LOG_H           200
 #define PAGE_H          660
 #define TAB_H           40
 #define TAB_BTN_W       120
@@ -114,6 +131,13 @@ static COLORREF g_clrLogSkip    = RGB(108, 112, 134);  /* #6C7086 */
 
 /* ── Structures ──────────────────────────────────────────────── */
 
+/* Failed file entry for summary */
+typedef struct FailEntry {
+    char filename[256];
+    char reason[256];
+    struct FailEntry *next;
+} FailEntry;
+
 typedef struct {
     HWND hwnd;
     char target[GUI_PATH_LEN];
@@ -123,6 +147,10 @@ typedef struct {
     char outdir[GUI_PATH_LEN];
     int recursive;
     int force;
+    volatile LONG ok_count;
+    volatile LONG fail_count;
+    volatile LONG skip_count;
+    FailEntry *fail_list;
 } SignTask;
 
 typedef struct {
@@ -136,6 +164,15 @@ typedef struct {
     int days;
 } CertTask;
 
+typedef struct {
+    HWND hwnd;
+    char pe_path[GUI_PATH_LEN];
+    char ca_path[GUI_PATH_LEN];
+    int recursive;
+    int is_dir;
+    int result;
+} VerifyTask;
+
 /* ── Globals ─────────────────────────────────────────────────── */
 
 static HINSTANCE g_hInst;
@@ -146,11 +183,12 @@ static HFONT g_hMonoFont;
 static HBRUSH g_hbrBg, g_hbrPanel, g_hbrLogBg, g_hbrEditBg, g_hbrAccent;
 
 static HWND g_hwndMain;
-static HWND g_hBtnSign, g_hBtnCert;        /* tab buttons */
-static HWND g_hPageSign, g_hPageCert;
+static HWND g_hBtnSign, g_hBtnCert, g_hBtnVerify;  /* tab buttons */
+static HWND g_hPageSign, g_hPageCert, g_hPageVerify;
 static HWND g_hProgress, g_hLog;
 static HANDLE g_hThread;
 static HANDLE g_hCertThread;
+static HANDLE g_hVerifyThread;
 
 static int g_curTab = 0;                   /* 0 = sign, 1 = cert */
 static int g_debug;
@@ -330,6 +368,28 @@ progress_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+/* ── Log listbox subclass (Ctrl+C/A shortcuts) ──────────────── */
+
+static LRESULT CALLBACK
+log_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+             UINT_PTR uIdSub, DWORD_PTR dwRef)
+{
+    (void)uIdSub; (void)dwRef;
+    if (msg == WM_KEYDOWN) {
+        if (wp == 'C' && GetKeyState(VK_CONTROL) < 0) {
+            SendMessageW(GetParent(hwnd), WM_COMMAND, IDM_COPY_SELECTED, 0);
+            return 0;
+        }
+        if (wp == 'A' && GetKeyState(VK_CONTROL) < 0) {
+            int count = (int)SendMessageW(hwnd, LB_GETCOUNT, 0, 0);
+            for (int i = 0; i < count; i++)
+                SendMessageW(hwnd, LB_SETSEL, TRUE, (LPARAM)i);
+            return 0;
+        }
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 /* ── Section header (blue left bar) ─────────────────────────── */
 
 static LRESULT CALLBACK
@@ -415,7 +475,8 @@ draw_tab_button(DRAWITEMSTRUCT *di)
     HWND btn = di->hwndItem;
     int isSel = (di->itemState & ODS_SELECTED) ||
                 (btn == g_hBtnSign && g_curTab == 0) ||
-                (btn == g_hBtnCert && g_curTab == 1);
+                (btn == g_hBtnCert && g_curTab == 1) ||
+                (btn == g_hBtnVerify && g_curTab == 2);
     int isHov = (btn == g_hHoverBtn);
     RECT rc = di->rcItem;
     HDC hdc = di->hDC;
@@ -512,6 +573,12 @@ create_tab_buttons(HWND parent)
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         86, 0, 100, TAB_H,
         parent, (HMENU)(INT_PTR)IDC_TAB_CERT_BTN, g_hInst, NULL);
+
+    g_hBtnVerify = CreateWindowExW(0, L"BUTTON",
+        L"验证",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        186, 0, 80, TAB_H,
+        parent, (HMENU)(INT_PTR)IDC_TAB_VERIFY_BTN, g_hInst, NULL);
 }
 
 static void
@@ -520,8 +587,10 @@ switch_tab(int idx)
     g_curTab = idx;
     ShowWindow(g_hPageSign, idx == 0 ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hPageCert, idx == 1 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hPageVerify, idx == 2 ? SW_SHOW : SW_HIDE);
     InvalidateRect(g_hBtnSign, NULL, TRUE);
     InvalidateRect(g_hBtnCert, NULL, TRUE);
+    InvalidateRect(g_hBtnVerify, NULL, TRUE);
 }
 
 /* ══════════════════════════════════════════════════════════════ */
@@ -643,37 +712,6 @@ create_sign_page(HWND parent)
     /* Sign button (primary) */
     make_ctrl(g_hPageSign, L"BUTTON", L"开始签名",
               BS_OWNERDRAW, 0, y, 140, BTN_H, IDC_BTN_SIGN);
-    y += BTN_H + 12;
-
-    /* Progress bar (custom painted) */
-    g_hProgress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
-                    WS_CHILD | WS_VISIBLE,
-                    0, y, pw, 8,
-                    g_hPageSign, (HMENU)(INT_PTR)IDC_PROGRESS, g_hInst, NULL);
-    SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
-    SetWindowSubclass(g_hProgress, progress_subclass, 0, 0);
-    y += 14;
-
-    /* Section: 日志输出 */
-    HWND hLogHdr = make_ctrl(g_hPageSign, L"STATIC", L"日志输出",
-                    SS_OWNERDRAW, 0, y, 300, LH + 4, IDC_LBL_LOG_TITLE);
-    SetWindowSubclass(hLogHdr, header_subclass, 0, 0);
-    y += LH + 6;
-
-    /* Log list (dark theme via WM_CTLCOLORLISTBOX) */
-    g_hLog = CreateWindowExW(0, L"LISTBOX", L"",
-              WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER |
-              LBS_NOINTEGRALHEIGHT,
-              0, y, pw, 200,
-              g_hPageSign, (HMENU)(INT_PTR)IDC_LIST_LOG, g_hInst, NULL);
-    g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                               DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                               0, L"Consolas");
-    if (!g_hMonoFont)
-        g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                                   DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                                   0, L"Segoe UI");
-    SendMessageW(g_hLog, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
 }
 
 /* ══════════════════════════════════════════════════════════════ */
@@ -772,11 +810,80 @@ create_cert_page(HWND parent)
     /* Generate button (primary) */
     make_ctrl(g_hPageCert, L"BUTTON", L"生成证书",
               BS_OWNERDRAW, 0, y, 160, BTN_H, IDC_BTN_GENERATE);
-    y += BTN_H + 12;
+}
 
-    /* Status label */
-    make_ctrl(g_hPageCert, L"STATIC", L"",
-              SS_LEFT, 0, y, pw - 16, 140, IDC_LBL_CERT_STATUS);
+/* ══════════════════════════════════════════════════════════════ */
+/*  Verify page                                                   */
+/* ══════════════════════════════════════════════════════════════ */
+
+static void
+create_verify_page(HWND parent)
+{
+    int pw = W_CLIENT - 2 * PAD;
+
+    g_hPageVerify = CreateWindowExW(0, L"STATIC", L"",
+                                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                                    PAD, TAB_H + 4, pw, PAGE_H,
+                                    parent, NULL, g_hInst, NULL);
+
+    int y = 4;
+
+    /* Section: 签名验证 */
+    HWND hHdr = make_ctrl(g_hPageVerify, L"STATIC", L"签名验证",
+                  SS_OWNERDRAW, 0, y, 300, LH + 4, 0);
+    SetWindowSubclass(hHdr, header_subclass, 0, 0);
+    y += LH + 12;
+
+    /* Description */
+    make_ctrl(g_hPageVerify, L"STATIC",
+              L"验证 PE 文件的 Authenticode 签名有效性。\n"
+              L"支持选择单个文件或目录（批量验证），可选 CA 证书验证证书链。",
+              SS_LEFT, 8, y, pw - 16, 36, 0);
+    y += 44;
+
+    /* PE 文件 */
+    make_ctrl(g_hPageVerify, L"STATIC", L"PE 文件:",
+              0, 8, y, W_EDIT, LH, 0);
+    y += LH + 4;
+
+    CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        0, y, W_EDIT, EH,
+        g_hPageVerify, (HMENU)(INT_PTR)IDC_EDIT_VERIFY_PE, g_hInst, NULL);
+    make_ctrl(g_hPageVerify, L"BUTTON", L"浏览...",
+              BS_OWNERDRAW, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_VPE);
+    y += EH + 10;
+
+    /* CA 证书 (可选) */
+    make_ctrl(g_hPageVerify, L"STATIC",
+              L"CA 证书 (可选, 用于验证证书链):",
+              0, 8, y, pw, LH, 0);
+    y += LH + 4;
+
+    CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        0, y, W_EDIT, EH,
+        g_hPageVerify, (HMENU)(INT_PTR)IDC_EDIT_VERIFY_CA, g_hInst, NULL);
+    make_ctrl(g_hPageVerify, L"BUTTON", L"浏览...",
+              BS_OWNERDRAW, W_EDIT + 6, y, W_BROWSE, EH, IDC_BTN_BROWSE_VCA);
+    y += EH + 10;
+
+    /* Checkbox: recursive */
+    {
+        HWND hChk = make_ctrl(g_hPageVerify, L"BUTTON", L"包含子目录",
+                      BS_AUTOCHECKBOX, 4, y, 140, LH, IDC_CHK_VERIFY_RECURSIVE);
+        SetWindowTheme(hChk, L"", L"");
+    }
+    y += LH + 12;
+
+    /* Thin separator */
+    make_ctrl(g_hPageVerify, L"STATIC", L"", SS_ETCHEDHORZ,
+              0, y, pw, 1, IDC_SEP_VERIFY);
+    y += 10;
+
+    /* Verify button (primary) */
+    make_ctrl(g_hPageVerify, L"BUTTON", L"开始验证",
+              BS_OWNERDRAW, 0, y, 140, BTN_H, IDC_BTN_VERIFY);
 }
 
 /* ══════════════════════════════════════════════════════════════ */
@@ -847,24 +954,34 @@ static void
 thread_progress_cb(const char *filename, int current, int total,
                    int success, void *user_data)
 {
-    (void)user_data;
+    SignTask *task = (SignTask *)user_data;
     if (!filename) return;
     if (total > 0)
         post_progress((int)(current * 100 / total));
 
-    wchar_t wfile[GUI_PATH_LEN];
-    wide_from_utf8(filename, wfile, GUI_PATH_LEN);
-
-    if (success == 1)
-        post_log_utf8(LOG_COLOR_OK, "[OK] %s", filename);
-    else if (success == -2)
-        post_log_utf8(LOG_COLOR_SKIP, "[跳过] %s", filename);
-    else if (success == -3)
+    if (success == 1) {
+        post_log_utf8(LOG_COLOR_OK, "[%d/%d] %s → [OK]", current, total, filename);
+        if (task) InterlockedIncrement(&task->ok_count);
+    } else if (success == -2) {
+        post_log_utf8(LOG_COLOR_SKIP, "[%d/%d] %s → [跳过]", current, total, filename);
+        if (task) InterlockedIncrement(&task->skip_count);
+    } else if (success == -3)
         post_log_utf8(LOG_COLOR_INFO, "%s", filename);
     else if (success == -4)
         post_log_utf8(LOG_COLOR_INFO, "  %s", filename);
-    else if (success == 0)
-        post_log_utf8(LOG_COLOR_FAIL, "[失败] %s", filename);
+    else if (success == 0) {
+        post_log_utf8(LOG_COLOR_FAIL, "[%d/%d] %s → [失败]", current, total, filename);
+        if (task) {
+            InterlockedIncrement(&task->fail_count);
+            FailEntry *entry = calloc(1, sizeof(FailEntry));
+            if (entry) {
+                snprintf(entry->filename, sizeof(entry->filename), "%s", filename);
+                snprintf(entry->reason, sizeof(entry->reason), "签名失败");
+                entry->next = task->fail_list;
+                task->fail_list = entry;
+            }
+        }
+    }
 
     log_debug_utf8("  [调试] 进度: %d/%d, 结果: %d",
                    current, total, success);
@@ -889,9 +1006,23 @@ sign_thread_proc(LPVOID param)
                            task->force, task->recursive,
                            thread_progress_cb, task);
 
-    post_log_utf8(LOG_COLOR_INFO, "完成 - 已签名 %d 个文件", count);
+    post_log_utf8(LOG_COLOR_INFO, "完成: 成功 %d / 跳过 %d / 失败 %d",
+                  task->ok_count, task->skip_count, task->fail_count);
+
+    /* List failed files */
+    if (task->fail_list) {
+        post_log_utf8(LOG_COLOR_FAIL, "失败文件:");
+        for (FailEntry *e = task->fail_list; e; e = e->next)
+            post_log_utf8(LOG_COLOR_FAIL, "  - %s (%s)", e->filename, e->reason);
+    }
     PostMessageW(hwnd, WM_APP_SIGN_DONE, (WPARAM)count, (LPARAM)task);
     return 0;
+}
+
+static void cert_status_callback(const char *status, void *user_data)
+{
+    (void)user_data;
+    post_log_utf8(LOG_COLOR_INFO, "%s", status);
 }
 
 static DWORD WINAPI
@@ -900,13 +1031,88 @@ cert_thread_proc(LPVOID param)
     CertTask *task = (CertTask *)param;
     if (!task) return 0;
 
-    int ok = cert_generate(task->dir, NULL,
-                           task->pw[0] ? task->pw : NULL,
-                           task->days,
-                           task->cn[0] ? task->cn : NULL,
-                           task->email[0] ? task->email : NULL);
+    post_log_utf8(LOG_COLOR_INFO, "─── 开始生成证书 ───");
+
+    int ok = cert_generate_ex(task->dir, NULL,
+                              task->pw[0] ? task->pw : NULL,
+                              task->days,
+                              task->cn[0] ? task->cn : NULL,
+                              task->email[0] ? task->email : NULL,
+                              cert_status_callback, NULL);
+
+    if (ok)
+        post_log_utf8(LOG_COLOR_OK, "完成: 证书生成成功");
+    else
+        post_log_utf8(LOG_COLOR_FAIL, "完成: 证书生成失败");
 
     PostMessageW(task->hwnd, WM_APP_CERT_DONE, (WPARAM)ok, (LPARAM)task);
+    return 0;
+}
+
+static void verify_status_callback(const char *status, void *user_data)
+{
+    (void)user_data;
+    post_log_utf8(LOG_COLOR_INFO, "%s", status);
+}
+
+static void
+verify_progress_cb(const char *filename, int current, int total,
+                   int success, void *user_data)
+{
+    (void)user_data;
+    if (!filename) return;
+
+    if (success == 1)
+        post_log_utf8(LOG_COLOR_OK, "[%d/%d] %s → [有效]", current, total, filename);
+    else if (success == -1)
+        post_log_utf8(LOG_COLOR_SKIP, "[%d/%d] %s → [未签名]", current, total, filename);
+    else if (success == 0)
+        post_log_utf8(LOG_COLOR_FAIL, "[%d/%d] %s → [无效]", current, total, filename);
+    else if (success == -3)
+        post_log_utf8(LOG_COLOR_INFO, "%s", filename);
+}
+
+static DWORD WINAPI
+verify_thread_proc(LPVOID param)
+{
+    VerifyTask *task = (VerifyTask *)param;
+    if (!task) return 0;
+
+    if (task->is_dir) {
+        /* Batch verify */
+        post_log_utf8(LOG_COLOR_INFO, "─── 批量验证 %s ───", task->pe_path);
+
+        int valid = batch_verify(task->pe_path,
+                                 task->ca_path[0] ? task->ca_path : NULL,
+                                 task->recursive,
+                                 verify_progress_cb, NULL);
+
+        if (valid < 0) {
+            post_log_utf8(LOG_COLOR_FAIL, "未找到 PE 文件");
+            task->result = 0;
+        } else {
+            post_log_utf8(LOG_COLOR_INFO, "完成: 有效 %d 个", valid);
+            task->result = (valid > 0) ? 1 : 0;
+        }
+    } else {
+        /* Single file verify */
+        const char *fname = strrchr(task->pe_path, '/');
+        if (!fname) fname = strrchr(task->pe_path, '\\');
+        fname = fname ? fname + 1 : task->pe_path;
+
+        post_log_utf8(LOG_COLOR_INFO, "─── 验证 %s ───", fname);
+
+        task->result = authenticode_verify_ex(task->pe_path,
+                                              task->ca_path[0] ? task->ca_path : NULL,
+                                              verify_status_callback, NULL);
+
+        if (task->result)
+            post_log_utf8(LOG_COLOR_OK, "签名验证通过");
+        else
+            post_log_utf8(LOG_COLOR_FAIL, "签名验证失败");
+    }
+
+    PostMessageW(task->hwnd, WM_APP_VERIFY_DONE, (WPARAM)task->result, (LPARAM)task);
     return 0;
 }
 
@@ -1144,6 +1350,12 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_hThread = NULL;
         }
         EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), TRUE);
+        ShowWindow(g_hProgress, SW_HIDE);
+        /* Free failure list */
+        {
+            FailEntry *e = task->fail_list;
+            while (e) { FailEntry *next = e->next; free(e); e = next; }
+        }
         free(task);
         return 0;
     }
@@ -1166,15 +1378,23 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                      task->wdir,
                      task->wpw[0] ? L"PFX 密码已设置，签名时请使用相同密码。\n\n"
                                    : L"PFX 无密码，签名时密码留空即可。\n\n");
-            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS, msg);
             MessageBoxW(task->hwnd, msg, L"成功", MB_OK | MB_ICONINFORMATION);
         } else {
-            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
-                            L"生成失败! 请检查输出目录和参数。");
             MessageBoxW(task->hwnd, L"证书生成失败。",
                         L"错误", MB_OK | MB_ICONERROR);
         }
         EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), TRUE);
+        free(task);
+        return 0;
+    }
+    case WM_APP_VERIFY_DONE: {
+        VerifyTask *task = (VerifyTask *)lParam;
+        if (g_hVerifyThread) {
+            WaitForSingleObject(g_hVerifyThread, INFINITE);
+            CloseHandle(g_hVerifyThread);
+            g_hVerifyThread = NULL;
+        }
+        EnableWindow(GetDlgItem(g_hPageVerify, IDC_BTN_VERIFY), TRUE);
         free(task);
         return 0;
     }
@@ -1251,6 +1471,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         create_tab_buttons(hwnd);
         SendMessageW(g_hBtnSign, WM_SETFONT, (WPARAM)g_hFontTab, TRUE);
         SendMessageW(g_hBtnCert, WM_SETFONT, (WPARAM)g_hFontTab, TRUE);
+        SendMessageW(g_hBtnVerify, WM_SETFONT, (WPARAM)g_hFontTab, TRUE);
 
         /* About button (right side of tab bar) */
         {
@@ -1273,12 +1494,15 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         /* Pages */
         create_sign_page(hwnd);
         create_cert_page(hwnd);
+        create_verify_page(hwnd);
         apply_font(g_hPageSign);
         apply_font(g_hPageCert);
+        apply_font(g_hPageVerify);
 
         /* Subclass pages for message forwarding */
         SetWindowSubclass(g_hPageSign, page_subclass, 0, 0);
         SetWindowSubclass(g_hPageCert, page_subclass, 0, 0);
+        SetWindowSubclass(g_hPageVerify, page_subclass, 0, 0);
 
         /* Subclass edit controls for focus border */
         {
@@ -1301,12 +1525,16 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (hEd) SetWindowSubclass(hEd, edit_subclass, 0, 0);
             hEd = GetDlgItem(g_hPageCert, IDC_EDIT_CERT_EMAIL);
             if (hEd) SetWindowSubclass(hEd, edit_subclass, 0, 0);
+            hEd = GetDlgItem(g_hPageVerify, IDC_EDIT_VERIFY_PE);
+            if (hEd) SetWindowSubclass(hEd, edit_subclass, 0, 0);
+            hEd = GetDlgItem(g_hPageVerify, IDC_EDIT_VERIFY_CA);
+            if (hEd) SetWindowSubclass(hEd, edit_subclass, 0, 0);
         }
 
         /* Subclass all buttons for hover tracking */
         {
             HWND hBtns[] = {
-                g_hBtnSign, g_hBtnCert,
+                g_hBtnSign, g_hBtnCert, g_hBtnVerify,
                 GetDlgItem(g_hPageSign, IDC_BTN_BROWSE_TGT),
                 GetDlgItem(g_hPageSign, IDC_BTN_BROWSE_PFX),
                 GetDlgItem(g_hPageSign, IDC_BTN_BROWSE_OUT),
@@ -1314,9 +1542,57 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 GetDlgItem(g_hPageSign, IDC_BTN_SIGN),
                 GetDlgItem(g_hPageCert, IDC_BTN_BROWSE_CD),
                 GetDlgItem(g_hPageCert, IDC_BTN_GENERATE),
+                GetDlgItem(g_hPageVerify, IDC_BTN_BROWSE_VPE),
+                GetDlgItem(g_hPageVerify, IDC_BTN_BROWSE_VCA),
+                GetDlgItem(g_hPageVerify, IDC_BTN_VERIFY),
             };
             for (int i = 0; i < (int)(sizeof(hBtns)/sizeof(hBtns[0])); i++)
                 if (hBtns[i]) SetWindowSubclass(hBtns[i], button_subclass, 0, 0);
+        }
+
+        /* Global log area (shared across all tabs) */
+        g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                   DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                                   0, L"Consolas");
+        if (!g_hMonoFont)
+            g_hMonoFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                       DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                                       0, L"Segoe UI");
+
+        /* Progress bar (global, initially hidden) */
+        g_hProgress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
+                        WS_CHILD,
+                        0, 0, 0, 0,
+                        hwnd, (HMENU)(INT_PTR)IDC_PROGRESS, g_hInst, NULL);
+        SendMessageW(g_hProgress, PBM_SETRANGE32, 0, 100);
+        SetWindowSubclass(g_hProgress, progress_subclass, 0, 0);
+
+        /* Log section header */
+        {
+            HWND hLogHdr = CreateWindowExW(0, L"STATIC", L"日志输出",
+                             WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+                             0, 0, 300, LH + 4,
+                             hwnd, (HMENU)(INT_PTR)IDC_LBL_LOG_TITLE, g_hInst, NULL);
+            SetWindowSubclass(hLogHdr, header_subclass, 0, 0);
+        }
+
+        /* Log listbox (global) */
+        g_hLog = CreateWindowExW(0, L"LISTBOX", L"",
+                   WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER |
+                   LBS_NOINTEGRALHEIGHT | LBS_EXTENDEDSEL,
+                   0, 0, 0, 0,
+                   hwnd, (HMENU)(INT_PTR)IDC_LIST_LOG, g_hInst, NULL);
+        SendMessageW(g_hLog, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
+        SetWindowSubclass(g_hLog, log_subclass, 0, 0);
+
+        /* Export log button */
+        {
+            HWND hExp = CreateWindowExW(0, L"BUTTON", L"导出日志",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 80, TAB_H,
+                hwnd, (HMENU)(INT_PTR)IDC_BTN_EXPORT_LOG, g_hInst, NULL);
+            SendMessageW(hExp, WM_SETFONT, (WPARAM)g_hFontTab, TRUE);
+            SetWindowSubclass(hExp, button_subclass, 0, 0);
         }
 
         switch_tab(0);
@@ -1342,19 +1618,22 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_SIZE: {
         int cw = LOWORD(lParam), ch = HIWORD(lParam);
         int pw = cw - 2 * PAD;
-        int ph = ch - TAB_H - 12;
+        int log_top = ch - LOG_H - 8;
+        int ph = log_top - TAB_H - 12;
 
         /* About + Update + Tab buttons: auto-size tabs, right-align extras */
         {
             /* Measure tab text widths to auto-size buttons */
             HDC hdc = GetDC(hwnd);
             HGDIOBJ oF = SelectObject(hdc, g_hFontTab);
-            wchar_t tSign[32], tCert[32];
+            wchar_t tSign[32], tCert[32], tVerify[32];
             GetWindowTextW(g_hBtnSign, tSign, 32);
             GetWindowTextW(g_hBtnCert, tCert, 32);
-            SIZE szSign, szCert;
+            GetWindowTextW(g_hBtnVerify, tVerify, 32);
+            SIZE szSign, szCert, szVerify;
             GetTextExtentPoint32W(hdc, tSign, (int)wcslen(tSign), &szSign);
             GetTextExtentPoint32W(hdc, tCert, (int)wcslen(tCert), &szCert);
+            GetTextExtentPoint32W(hdc, tVerify, (int)wcslen(tVerify), &szVerify);
 
             /* Measure About/Update text too */
             HWND hAbout = GetDlgItem(hwnd, IDC_BTN_ABOUT);
@@ -1370,16 +1649,19 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             int tabSignW  = szSign.cx + 28;
             int tabCertW  = szCert.cx + 28;
+            int tabVerifyW = szVerify.cx + 28;
             int aboutW    = szAbout.cx + 28;
             int updW      = szUpd.cx + 28;
             int btnGap    = 6;
 
-            /* All 4 buttons left-aligned as a group */
+            /* All buttons left-aligned as a group */
             int x = 0;
             SetWindowPos(g_hBtnSign, NULL, x, 0, tabSignW, TAB_H, SWP_NOZORDER);
             x += tabSignW + btnGap;
             SetWindowPos(g_hBtnCert, NULL, x, 0, tabCertW, TAB_H, SWP_NOZORDER);
             x += tabCertW + btnGap;
+            SetWindowPos(g_hBtnVerify, NULL, x, 0, tabVerifyW, TAB_H, SWP_NOZORDER);
+            x += tabVerifyW + btnGap;
             if (hAbout)
                 SetWindowPos(hAbout, NULL, x, 0, aboutW, TAB_H, SWP_NOZORDER);
             x += aboutW + btnGap;
@@ -1391,6 +1673,8 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetWindowPos(g_hPageSign, NULL, PAD, TAB_H + 4, pw, ph, SWP_NOZORDER);
         if (g_hPageCert)
             SetWindowPos(g_hPageCert, NULL, PAD, TAB_H + 4, pw, ph, SWP_NOZORDER);
+        if (g_hPageVerify)
+            SetWindowPos(g_hPageVerify, NULL, PAD, TAB_H + 4, pw, ph, SWP_NOZORDER);
 
         /* Separators */
         HWND hSep;
@@ -1406,22 +1690,37 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             MapWindowPoints(NULL, g_hPageCert, (POINT *)&r, 2);
             SetWindowPos(hSep, NULL, 0, r.top, pw, 1, SWP_NOZORDER);
         }
+        hSep = GetDlgItem(g_hPageVerify, IDC_SEP_VERIFY);
+        if (hSep) {
+            RECT r; GetWindowRect(hSep, &r);
+            MapWindowPoints(NULL, g_hPageVerify, (POINT *)&r, 2);
+            SetWindowPos(hSep, NULL, 0, r.top, pw, 1, SWP_NOZORDER);
+        }
 
-        /* Progress + Log */
-        if (g_hPageSign) {
-            HWND hProg = GetDlgItem(g_hPageSign, IDC_PROGRESS);
-            HWND hLst  = GetDlgItem(g_hPageSign, IDC_LIST_LOG);
-            if (hProg) {
-                RECT r; GetWindowRect(hProg, &r);
-                MapWindowPoints(NULL, g_hPageSign, (POINT *)&r, 2);
-                SetWindowPos(hProg, NULL, 0, r.top, pw, 8, SWP_NOZORDER);
+        /* Global progress bar + log area at bottom */
+        {
+            int log_y = log_top;
+
+            /* Section header + export button */
+            HWND hLogHdr = GetDlgItem(hwnd, IDC_LBL_LOG_TITLE);
+            if (hLogHdr)
+                SetWindowPos(hLogHdr, NULL, PAD, log_y, 300, LH + 4, SWP_NOZORDER);
+            HWND hExpBtn = GetDlgItem(hwnd, IDC_BTN_EXPORT_LOG);
+            if (hExpBtn)
+                SetWindowPos(hExpBtn, NULL, pw - 80 + PAD, log_y - 2, 80, LH + 6, SWP_NOZORDER);
+            log_y += LH + 6;
+
+            /* Progress bar (always reserve space) */
+            if (g_hProgress) {
+                SetWindowPos(g_hProgress, NULL, PAD, log_y, pw, 8, SWP_NOZORDER);
             }
-            if (hLst) {
-                RECT r; GetWindowRect(hLst, &r);
-                MapWindowPoints(NULL, g_hPageSign, (POINT *)&r, 2);
-                int lh = ph - r.top - 8;
-                if (lh < 50) lh = 50;
-                SetWindowPos(hLst, NULL, 0, r.top, pw, lh, SWP_NOZORDER);
+            log_y += 14;
+
+            /* Log listbox */
+            if (g_hLog) {
+                int log_h = ch - log_y - 8;
+                if (log_h < 50) log_h = 50;
+                SetWindowPos(g_hLog, NULL, PAD, log_y, pw, log_h, SWP_NOZORDER);
             }
         }
         return 0;
@@ -1442,14 +1741,14 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wParam;
         HWND hCtrl = (HWND)lParam;
-        if (hCtrl == g_hPageSign || hCtrl == g_hPageCert) {
+        if (hCtrl == g_hPageSign || hCtrl == g_hPageCert || hCtrl == g_hPageVerify) {
             SetTextColor(hdc, g_clrText);
             SetBkColor(hdc, g_clrEditBg);
             return (LRESULT)g_hbrEditBg;
         }
         int id = GetDlgCtrlID(hCtrl);
         HWND hParent = GetParent(hCtrl);
-        if (hParent == g_hPageSign || hParent == g_hPageCert) {
+        if (hParent == g_hPageSign || hParent == g_hPageCert || hParent == g_hPageVerify) {
             SetTextColor(hdc, g_clrText);
             SetBkColor(hdc, g_clrEditBg);
             return (LRESULT)g_hbrEditBg;
@@ -1527,20 +1826,23 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         DRAWITEMSTRUCT *di = (DRAWITEMSTRUCT *)lParam;
 
         /* Tab buttons */
-        if (di->CtlID == IDC_TAB_SIGN_BTN || di->CtlID == IDC_TAB_CERT_BTN) {
+        if (di->CtlID == IDC_TAB_SIGN_BTN || di->CtlID == IDC_TAB_CERT_BTN ||
+            di->CtlID == IDC_TAB_VERIFY_BTN) {
             draw_tab_button(di);
             return TRUE;
         }
         /* Primary action buttons */
-        if (di->CtlID == IDC_BTN_SIGN || di->CtlID == IDC_BTN_GENERATE) {
+        if (di->CtlID == IDC_BTN_SIGN || di->CtlID == IDC_BTN_GENERATE ||
+            di->CtlID == IDC_BTN_VERIFY) {
             draw_breeze_button(di, 1);
             return TRUE;
         }
         /* Secondary buttons (browse, test, about) */
         if (di->CtlID == IDC_BTN_BROWSE_TGT || di->CtlID == IDC_BTN_BROWSE_PFX ||
             di->CtlID == IDC_BTN_BROWSE_OUT || di->CtlID == IDC_BTN_BROWSE_CD ||
+            di->CtlID == IDC_BTN_BROWSE_VPE || di->CtlID == IDC_BTN_BROWSE_VCA ||
             di->CtlID == IDC_BTN_TEST_TSA || di->CtlID == IDC_BTN_ABOUT ||
-            di->CtlID == IDC_BTN_UPDATE) {
+            di->CtlID == IDC_BTN_UPDATE || di->CtlID == IDC_BTN_EXPORT_LOG) {
             draw_breeze_button(di, 0);
             return TRUE;
         }
@@ -1561,6 +1863,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         /* Tab switching */
         if (id == IDC_TAB_SIGN_BTN) { switch_tab(0); return 0; }
         if (id == IDC_TAB_CERT_BTN) { switch_tab(1); return 0; }
+        if (id == IDC_TAB_VERIFY_BTN) { switch_tab(2); return 0; }
 
         /* About */
         if (id == IDC_BTN_ABOUT) {
@@ -1579,7 +1882,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             wchar_t path[GUI_PATH_LEN] = {0};
             BROWSEINFOW bi = {0};
             bi.hwndOwner = hwnd;
-            bi.lpszTitle = L"选择目标目录";
+            bi.lpszTitle = L"选择目标目录（批量签名）";
             bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
             LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
             if (pidl) {
@@ -1677,6 +1980,7 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             task->force     = force;
 
             EnableWindow(GetDlgItem(g_hPageSign, IDC_BTN_SIGN), FALSE);
+            ShowWindow(g_hProgress, SW_SHOW);
             SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
             log_message(LOG_COLOR_INFO, L"─── 新签名 %s ───", wtarget);
             if (g_debug)
@@ -1754,29 +2058,191 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             CreateDirectoryW(task->wdir, NULL);
 
             EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), FALSE);
-            SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
-                            L"正在生成...");
 
             HANDLE hThread = CreateThread(NULL, 0, cert_thread_proc, task, 0, NULL);
             if (!hThread) {
                 free(task);
                 EnableWindow(GetDlgItem(g_hPageCert, IDC_BTN_GENERATE), TRUE);
-                SetDlgItemTextW(g_hPageCert, IDC_LBL_CERT_STATUS,
-                                L"创建线程失败");
                 MessageBoxW(hwnd, L"无法创建证书生成线程。",
                             L"错误", MB_OK | MB_ICONERROR);
             } else {
                 g_hCertThread = hThread;
             }
         }
+        else if (id == IDC_BTN_BROWSE_VPE) {
+            wchar_t path[GUI_PATH_LEN] = {0};
+            OPENFILENAMEW ofn = {0};
+            ofn.lStructSize  = sizeof(ofn);
+            ofn.hwndOwner    = hwnd;
+            ofn.lpstrFile    = path;
+            ofn.nMaxFile     = GUI_PATH_LEN;
+            ofn.lpstrFilter  = L"PE Files\0*.exe;*.dll;*.sys;*.ocx;*.scr;*.cpl;*.efi\0All Files\0*.*\0";
+            ofn.nFilterIndex = 1;
+            ofn.Flags        = OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+            if (GetOpenFileNameW(&ofn))
+                SetDlgItemTextW(g_hPageVerify, IDC_EDIT_VERIFY_PE, path);
+        }
+        else if (id == IDC_BTN_BROWSE_VCA) {
+            wchar_t path[GUI_PATH_LEN] = {0};
+            OPENFILENAMEW ofn = {0};
+            ofn.lStructSize  = sizeof(ofn);
+            ofn.hwndOwner    = hwnd;
+            ofn.lpstrFile    = path;
+            ofn.nMaxFile     = GUI_PATH_LEN;
+            ofn.lpstrFilter  = L"Certificate Files\0*.cer;*.crt;*.pem;*.der\0All Files\0*.*\0";
+            ofn.nFilterIndex = 1;
+            ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+            if (GetOpenFileNameW(&ofn))
+                SetDlgItemTextW(g_hPageVerify, IDC_EDIT_VERIFY_CA, path);
+        }
+        else if (id == IDC_BTN_VERIFY) {
+            wchar_t wpe[GUI_PATH_LEN], wca[GUI_PATH_LEN];
+            GetDlgItemTextW(g_hPageVerify, IDC_EDIT_VERIFY_PE, wpe, GUI_PATH_LEN);
+            GetDlgItemTextW(g_hPageVerify, IDC_EDIT_VERIFY_CA, wca, GUI_PATH_LEN);
+
+            if (wcslen(wpe) == 0) {
+                MessageBoxW(hwnd, L"请选择要验证的 PE 文件或目录。",
+                            L"错误", MB_OK | MB_ICONERROR);
+                break;
+            }
+
+            DWORD attr = GetFileAttributesW(wpe);
+            if (attr == INVALID_FILE_ATTRIBUTES) {
+                MessageBoxW(hwnd, L"目标不存在。",
+                            L"错误", MB_OK | MB_ICONERROR);
+                break;
+            }
+
+            int is_dir = (attr & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+
+            if (!is_dir && wcslen(wca) > 0) {
+                DWORD ca_attr = GetFileAttributesW(wca);
+                if (ca_attr == INVALID_FILE_ATTRIBUTES || (ca_attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                    MessageBoxW(hwnd, L"CA 证书文件不存在。",
+                                L"错误", MB_OK | MB_ICONERROR);
+                    break;
+                }
+            }
+
+            if (g_hVerifyThread) {
+                MessageBoxW(hwnd, L"验证操作正在进行中，请等待完成。",
+                            L"提示", MB_OK | MB_ICONINFORMATION);
+                break;
+            }
+
+            int recursive = IsDlgButtonChecked(g_hPageVerify, IDC_CHK_VERIFY_RECURSIVE) == BST_CHECKED;
+
+            VerifyTask *task = calloc(1, sizeof(VerifyTask));
+            if (!task) break;
+            task->hwnd = hwnd;
+            task->is_dir = is_dir;
+            task->recursive = recursive;
+            wide_to_utf8(wpe, task->pe_path, GUI_PATH_LEN);
+            wide_to_utf8(wca, task->ca_path, GUI_PATH_LEN);
+
+            EnableWindow(GetDlgItem(g_hPageVerify, IDC_BTN_VERIFY), FALSE);
+
+            g_hVerifyThread = CreateThread(NULL, 0, verify_thread_proc, task, 0, NULL);
+            if (!g_hVerifyThread) {
+                free(task);
+                EnableWindow(GetDlgItem(g_hPageVerify, IDC_BTN_VERIFY), TRUE);
+                MessageBoxW(hwnd, L"无法创建验证线程。",
+                            L"错误", MB_OK | MB_ICONERROR);
+            }
+        }
+        else if (id == IDC_BTN_EXPORT_LOG) {
+            wchar_t path[GUI_PATH_LEN] = {0};
+            OPENFILENAMEW ofn = {0};
+            ofn.lStructSize  = sizeof(ofn);
+            ofn.hwndOwner    = hwnd;
+            ofn.lpstrFile    = path;
+            ofn.nMaxFile     = GUI_PATH_LEN;
+            ofn.lpstrFilter  = L"Text Files\0*.txt\0All Files\0*.*\0";
+            ofn.nFilterIndex = 1;
+            ofn.lpstrDefExt  = L"txt";
+            ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY;
+            if (GetSaveFileNameW(&ofn)) {
+                FILE *fp = _wfopen(path, L"w, ccs=UTF-8");
+                if (fp) {
+                    int count = (int)SendMessageW(g_hLog, LB_GETCOUNT, 0, 0);
+                    for (int i = 0; i < count; i++) {
+                        wchar_t buf[2048];
+                        int len = (int)SendMessageW(g_hLog, LB_GETTEXT, (WPARAM)i, (LPARAM)buf);
+                        if (len > 0) fwprintf(fp, L"%s\n", buf);
+                    }
+                    fclose(fp);
+                    MessageBoxW(hwnd, L"日志已导出。", L"导出成功", MB_OK | MB_ICONINFORMATION);
+                } else {
+                    MessageBoxW(hwnd, L"无法创建文件。", L"导出失败", MB_OK | MB_ICONERROR);
+                }
+            }
+        }
+        else if (id == IDM_COPY_SELECTED) {
+            int sel_count = (int)SendMessageW(g_hLog, LB_GETSELCOUNT, 0, 0);
+            if (sel_count > 0) {
+                int *sel = malloc(sel_count * sizeof(int));
+                if (sel) {
+                    SendMessageW(g_hLog, LB_GETSELITEMS, (WPARAM)sel_count, (LPARAM)sel);
+                    size_t total = 0;
+                    for (int i = 0; i < sel_count; i++) {
+                        int len = (int)SendMessageW(g_hLog, LB_GETTEXTLEN, (WPARAM)sel[i], 0);
+                        total += len + 2; /* +2 for \r\n */
+                    }
+                    wchar_t *clip = malloc((total + 1) * sizeof(wchar_t));
+                    if (clip) {
+                        clip[0] = L'\0';
+                        for (int i = 0; i < sel_count; i++) {
+                            wchar_t buf[2048];
+                            SendMessageW(g_hLog, LB_GETTEXT, (WPARAM)sel[i], (LPARAM)buf);
+                            wcscat(clip, buf);
+                            wcscat(clip, L"\r\n");
+                        }
+                        if (OpenClipboard(hwnd)) {
+                            EmptyClipboard();
+                            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (total + 1) * sizeof(wchar_t));
+                            if (hMem) {
+                                wchar_t *p = GlobalLock(hMem);
+                                wcscpy(p, clip);
+                                GlobalUnlock(hMem);
+                                SetClipboardData(CF_UNICODETEXT, hMem);
+                            }
+                            CloseClipboard();
+                        }
+                        free(clip);
+                    }
+                    free(sel);
+                }
+            }
+        }
+        else if (id == IDM_SELECT_ALL) {
+            int count = (int)SendMessageW(g_hLog, LB_GETCOUNT, 0, 0);
+            for (int i = 0; i < count; i++)
+                SendMessageW(g_hLog, LB_SETSEL, TRUE, (LPARAM)i);
+        }
 
         return 0;
+    }
+
+    /* ── Right-click context menu on log ──────────────────────── */
+
+    case WM_CONTEXTMENU: {
+        if ((HWND)wParam == g_hLog) {
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING, IDM_COPY_SELECTED, L"复制选中\tCtrl+C");
+            AppendMenuW(hMenu, MF_STRING, IDM_SELECT_ALL, L"全选\tCtrl+A");
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, x, y, 0, hwnd, NULL);
+            DestroyMenu(hMenu);
+            return 0;
+        }
+        break;
     }
 
     /* ── Close / Destroy ──────────────────────────────────── */
 
     case WM_CLOSE: {
-        if (g_hThread || g_hCertThread || g_hTSAThread) {
+        if (g_hThread || g_hCertThread || g_hTSAThread || g_hVerifyThread) {
             if (IDYES != MessageBoxW(hwnd,
                     L"操作尚未完成，确定要关闭吗？",
                     L"FileSigner", MB_YESNO | MB_ICONWARNING))
@@ -1808,6 +2274,11 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WaitForSingleObject(g_hUpdateThread, 3000);
             CloseHandle(g_hUpdateThread);
             g_hUpdateThread = NULL;
+        }
+        if (g_hVerifyThread) {
+            WaitForSingleObject(g_hVerifyThread, 5000);
+            CloseHandle(g_hVerifyThread);
+            g_hVerifyThread = NULL;
         }
         PostQuitMessage(0);
         return 0;

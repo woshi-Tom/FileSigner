@@ -240,6 +240,10 @@ int write_file(const char* filename, const unsigned char* data, size_t size) {
            original file remains intact (no data loss). */
         if (ReplaceFileW(wname, wtmp, NULL, 0, NULL, NULL)) {
             ret = 1;
+        } else if (MoveFileExW(wtmp, wname, MOVEFILE_REPLACE_EXISTING)) {
+            /* ReplaceFileW failed (target may not exist yet);
+               fall back to MoveFileExW which handles new files. */
+            ret = 1;
         } else {
             _wremove(wtmp);
         }

@@ -64,7 +64,33 @@ static int pe_list_add(PEList *list, const char *path)
     return 1;
 }
 
-/* Scan directory for .exe files */
+/* PE file extension list */
+static const wchar_t *pe_extensions_w[] = {
+    L".exe", L".dll", L".sys", L".ocx", L".scr",
+    L".cpl", L".ax",  L".efi", L".drv", L".mun", NULL
+};
+static const char *pe_extensions_a[] = {
+    ".exe", ".dll", ".sys", ".ocx", ".scr",
+    ".cpl", ".ax",  ".efi", ".drv", ".mun", NULL
+};
+
+#ifdef _WIN32
+static int is_pe_extension_w(const wchar_t *ext)
+{
+    for (int i = 0; pe_extensions_w[i]; i++)
+        if (_wcsicmp(ext, pe_extensions_w[i]) == 0) return 1;
+    return 0;
+}
+#else
+static int is_pe_extension_a(const char *ext)
+{
+    for (int i = 0; pe_extensions_a[i]; i++)
+        if (strcasecmp(ext, pe_extensions_a[i]) == 0) return 1;
+    return 0;
+}
+#endif
+
+/* Scan directory for PE files */
 static void scan_directory(const char *dir_path, int recursive, PEList *list)
 {
 #ifdef _WIN32
@@ -105,7 +131,7 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
                 scan_directory(fullpath, recursive, list);
         } else {
             const wchar_t *ext = wcsrchr(fd.cFileName, L'.');
-            if (ext && _wcsicmp(ext, L".exe") == 0) {
+            if (ext && is_pe_extension_w(ext)) {
                 pe_list_add(list, fullpath);
             }
         }
@@ -134,7 +160,7 @@ static void scan_directory(const char *dir_path, int recursive, PEList *list)
                 scan_directory(fullpath, recursive, list);
         } else if (S_ISREG(st.st_mode)) {
             const char *ext = strrchr(entry->d_name, '.');
-            if (ext && strcasecmp(ext, ".exe") == 0) {
+            if (ext && is_pe_extension_a(ext)) {
                 pe_list_add(list, fullpath);
             }
         }
@@ -189,17 +215,17 @@ int batch_sign(const char *dir_path,
     fprintf(stderr, "[batch_sign] scan done, count=%d\n", list.count);
 
     if (list.count == 0) {
-        if (cb) cb("[未找到 .exe 文件]", 0, 0, -3, cb_data);
-        printf("No .exe files found in: %s\n", dir_path);
-        return 0;
+        if (cb) cb("[未找到 PE 文件]", 0, 0, -3, cb_data);
+        printf("No PE files found in: %s\n", dir_path);
+        return -1;
     }
 
     {
         char msg[64];
-        snprintf(msg, sizeof(msg), "[找到 %d 个 .exe 文件]", list.count);
+        snprintf(msg, sizeof(msg), "[找到 %d 个 PE 文件]", list.count);
         if (cb) cb(msg, 0, list.count, -3, cb_data);
     }
-    printf("Found %d .exe file(s)\n", list.count);
+    printf("Found %d PE file(s)\n", list.count);
 
     /* Process each file */
     for (int i = 0; i < list.count; i++) {
@@ -252,4 +278,56 @@ int batch_sign(const char *dir_path,
 
     pe_list_free(&list);
     return signed_count;
+}
+
+int batch_verify(const char *dir_path,
+                 const char *ca_path,
+                 int recursive,
+                 batch_progress_cb cb,
+                 void *cb_data)
+{
+    PEList list;
+    int valid_count = 0;
+
+    pe_list_init(&list);
+
+    /* Scan for PE files */
+    if (cb) cb("[扫描目录...]", 0, 0, -3, cb_data);
+    scan_directory(dir_path, recursive, &list);
+
+    if (list.count == 0) {
+        if (cb) cb("[未找到 PE 文件]", 0, 0, -3, cb_data);
+        pe_list_free(&list);
+        return -1;
+    }
+
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "[找到 %d 个 PE 文件]", list.count);
+        if (cb) cb(msg, 0, list.count, -3, cb_data);
+    }
+
+    for (int i = 0; i < list.count; i++) {
+        const char *filepath = list.files[i];
+        const char *filename = strrchr(filepath, PATH_SEP);
+        filename = filename ? filename + 1 : filepath;
+
+        /* Check if signed first */
+        int is_signed = authenticode_is_signed(filepath);
+        if (is_signed <= 0) {
+            if (cb) cb(filename, i + 1, list.count, -1, cb_data);
+            continue;
+        }
+
+        /* Verify signature */
+        if (authenticode_verify(filepath, ca_path)) {
+            valid_count++;
+            if (cb) cb(filename, i + 1, list.count, 1, cb_data);
+        } else {
+            if (cb) cb(filename, i + 1, list.count, 0, cb_data);
+        }
+    }
+
+    pe_list_free(&list);
+    return valid_count;
 }

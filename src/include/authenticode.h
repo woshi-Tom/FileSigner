@@ -52,6 +52,19 @@ int authenticode_sign(const char *pe_path,
 int authenticode_verify(const char *pe_path, const char *ca_path);
 
 /*
+ * Verify an Authenticode-signed PE file with status callbacks.
+ *
+ * pe_path   — path to signed PE file
+ * ca_path   — path to trusted CA certificate (NULL = skip chain verification)
+ * status_cb — optional progress callback (NULL = no callback)
+ * cb_data   — user data for callback
+ *
+ * Returns 1 if signature is valid, 0 otherwise.
+ */
+int authenticode_verify_ex(const char *pe_path, const char *ca_path,
+                           authenticode_status_cb status_cb, void *cb_data);
+
+/*
  * Check if a PE file has an Authenticode signature
  * (does not validate, just checks presence).
  *
