@@ -121,16 +121,23 @@ int create_directory(const char* path) {
     for (p = tmp + 1; *p; p++) {
         if (*p == '/' || *p == '\\') {
             *p = '\0';
+            /* On Windows, bare "X:" (drive root) needs trailing backslash */
+            char save = *(p + 1);
+            if (tmp[0] && tmp[1] == ':' && tmp[2] == '\0') {
+                *p = '\\'; *(p + 1) = '\0';
+            }
             if (!directory_exists(tmp)) {
 #ifdef _WIN32
                 if (mkdir_utf8(tmp) != 0) {
 #else
                 if (mkdir(tmp, 0755) != 0) {
 #endif
+                    *p = '/'; *(p + 1) = save;
                     return 0;
                 }
             }
             *p = '/';
+            *(p + 1) = save;
         }
     }
 
