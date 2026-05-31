@@ -960,7 +960,7 @@ tsa_test_thread(LPVOID param)
 /*  About dialog & Update check                                   */
 /* ══════════════════════════════════════════════════════════════ */
 
-#define FILESIGNER_VERSION L"4.0.1"
+#define FILESIGNER_VERSION L"4.0.2"
 #define UPDATE_CHECK_URL   L"https://api.github.com/repos/woshi-Tom/FileSigner/releases/latest"
 
 static HANDLE g_hUpdateThread = NULL;
